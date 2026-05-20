@@ -3,7 +3,10 @@ import asyncio
 import json
 import logging
 import websockets
+from python_socks.async_.asyncio import Proxy
 from dotenv import load_dotenv
+from infrastructure.redis_client import RedisClient
+from infrastructure.entity_resolver import EntityResolver
 
 # Load environment variables
 load_dotenv()
@@ -23,6 +26,8 @@ class SharpBookWebsocketListener:
         # Default mock URI for setup
         self.uri = "wss://api.sharpbookmaker.com/v1/nba/ticks"
         self.is_running = False
+        self.redis = RedisClient()
+        self.resolver = EntityResolver()
 
     async def connect_and_listen(self):
         """
@@ -37,7 +42,17 @@ class SharpBookWebsocketListener:
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
                 logger.info(f"Connecting to websocket feed: {self.uri}")
                 
-                async with websockets.connect(self.uri, extra_headers=headers) as websocket:
+                # Configure proxy tunnel if PROXY_NETWORK_URL is set
+                connect_kwargs = {"extra_headers": headers}
+                if self.proxy_url:
+                    logger.info(f"Routing through proxy: {self.proxy_url}")
+                    proxy = Proxy.from_url(self.proxy_url)
+                    sock = await proxy.connect(dest_host=self.uri.split('//')[1].split('/')[0], dest_port=443)
+                    connect_kwargs["sock"] = sock
+                else:
+                    logger.info("No proxy configured, connecting directly.")
+                
+                async with websockets.connect(self.uri, **connect_kwargs) as websocket:
                     retry_delay = 1.0  # reset backoff on success
                     logger.info("Successfully connected to websocket stream.")
                     
@@ -66,23 +81,40 @@ class SharpBookWebsocketListener:
 
     async def process_message(self, message: str):
         """
-        Process incoming ticker updates. This should decode the json payload,
-        extract key fields, and push to Redis/database.
+        Process incoming ticker updates, resolve player identities, 
+        and push harmonized payloads to Redis.
         """
         try:
             data = json.loads(message)
-            # Log tick events at debug level to avoid cluttering stdout at high frequency
             logger.debug(f"Received tick: {data}")
             
-            # TODO: Add real time pipeline processing:
-            # 1. Parse JSON update to extract bookmaker, player, line, odds
-            # 2. Push raw data to Redis pub/sub or queue
-            # 3. Trigger state updater/arbitrage calculator
+            # 1. Parse raw incoming payload fields
+            raw_player_name = data.get("player_name", "unknown_player")
+            bookmaker = data.get("bookmaker", "sharp_book")
+            line = float(data.get("line", 0.0))
+            over_odds = int(data.get("over_odds", -110))
+            under_odds = int(data.get("under_odds", -110))
+
+            # 2. Hardened Entity Resolution step (Sprint 2 Core)
+            master_player_id = self.resolver.resolve_player(
+                book_name=bookmaker, 
+                remote_name=raw_player_name
+            )
+
+            # 3. Push harmonized data to the Redis O(1) storage pipeline
+            self.redis.process_incoming_tick(
+                player_id=master_player_id,
+                book=bookmaker,
+                line=line,
+                over_odds=over_odds,
+                under_odds=under_odds
+            )
+            logger.info(f"[TICK SUCCESS] Harmonized {raw_player_name} -> {master_player_id} | Line: {line}")
             
         except json.JSONDecodeError as err:
             logger.error(f"Failed to parse incoming payload as JSON: {err}")
         except Exception as err:
-            logger.error(f"Error handling tick data: {err}")
+            logger.error(f"Error handling tick data in pipeline loop: {err}")
 
     def stop(self):
         """Gracefully stop the listener loop."""

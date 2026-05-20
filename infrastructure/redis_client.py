@@ -56,6 +56,44 @@ class RedisClient:
             logger.error(f"Redis ping failed: {e}")
             return False
 
+    def process_incoming_tick(self, player_id: str, book: str, line: float, over_odds: int, under_odds: int):
+        """
+        O(1) execution pipeline for incoming WebSocket odds ticks.
+        """
+        import time
+        timestamp = int(time.time() * 1000) # Millisecond precision
+        
+        # 1. State Snapshot (Hashes) - Overwrites the current line instantly
+        state_key = f"state:odds:nba:points:{player_id}"
+        self.client.hset(state_key, mapping={
+            f"{book}_line": line,
+            f"{book}_over": over_odds,
+            f"{book}_under": under_odds,
+            f"{book}_last_updated": timestamp
+        })
+
+        # 2. Lookback Window (Sorted Sets) - Used by Jump-Diffusion models
+        history_key = f"history:nba:points:{player_id}:{book}"
+        import json
+        tick_payload = json.dumps({"line": line, "over": over_odds, "under": under_odds})
+        self.client.zadd(history_key, {tick_payload: timestamp})
+        
+        # Trim to last 5 minutes (300,000 ms) to prevent RAM bloat
+        cutoff = timestamp - 300000
+        self.client.zremrangebyscore(history_key, 0, cutoff)
+
+        # 3. Message Brokering (Streams) - Push to XGBoost/ZINB models downstream
+        stream_payload = {
+            "player_id": player_id,
+            "book": book,
+            "line": str(line),
+            "over_odds": str(over_odds),
+            "under_odds": str(under_odds),
+            "ts": str(timestamp)
+        }
+        self.client.xadd("stream:ticks:nba:points", stream_payload)
+        self.client.xtrim("stream:ticks:nba:points", maxlen=10000)
+
     def get_client(self) -> redis.Redis:
         """Retrieve direct redis-py client instance."""
         return self.client

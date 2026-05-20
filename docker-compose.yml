@@ -1,0 +1,18 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: quant_engine
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:alpine
+    restart: always
+    ports:
+      - "6379:6379"
