@@ -1,0 +1,515 @@
+{
+  "fetched_at": "2026-05-25T22:23:53.300441+00:00",
+  "api_calls_this_month": 55,
+  "lines": {
+    "cason wallace": {
+      "rebounds": {
+        "3.5": {
+          "pinnacle_true_prob": 0.4561503960301556,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      }
+    },
+    "chet holmgren": {
+      "rebounds": {
+        "7.5": {
+          "pinnacle_true_prob": 0.4767751837789805,
+          "pinnacle_line": 7.5,
+          "dk_line": 7.5
+        }
+      }
+    },
+    "deaaron fox": {
+      "rebounds": {
+        "3.5": {
+          "pinnacle_true_prob": 0.5603580698130197,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      }
+    },
+    "dean wade": {
+      "points": {
+        "2.5": {
+          "pinnacle_true_prob": 0.558797046641455,
+          "pinnacle_line": 2.5,
+          "dk_line": 2.5
+        },
+        "3.5": {
+          "pinnacle_true_prob": 0.44362292051756014,
+          "pinnacle_line": 3.5,
+          "dk_line": null
+        }
+      },
+      "assists": {
+        "0.5": {
+          "pinnacle_true_prob": 0.6289447580793299,
+          "pinnacle_line": 0.5,
+          "dk_line": 0.5
+        }
+      },
+      "rebounds": {
+        "3.5": {
+          "pinnacle_true_prob": 0.42146580014156115,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      }
+    },
+    "dennis schroder": {
+      "assists": {
+        "1.5": {
+          "pinnacle_true_prob": 0.5997235500777516,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        },
+        "2.5": {
+          "pinnacle_true_prob": 0.39823008849557523,
+          "pinnacle_line": 2.5,
+          "dk_line": null
+        }
+      },
+      "points": {
+        "4.5": {
+          "pinnacle_true_prob": 0.47209576799865116,
+          "pinnacle_line": 4.5,
+          "dk_line": 4.5
+        }
+      },
+      "rebounds": {
+        "1.5": {
+          "pinnacle_true_prob": 0.38763863465058684,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      }
+    },
+    "devin vassell": {
+      "rebounds": {
+        "4.5": {
+          "pinnacle_true_prob": 0.5,
+          "pinnacle_line": 4.5,
+          "dk_line": 4.5
+        }
+      }
+    },
+    "isaiah hartenstein": {
+      "rebounds": {
+        "7.5": {
+          "pinnacle_true_prob": 0.5112107623318386,
+          "pinnacle_line": 7.5,
+          "dk_line": 7.5
+        }
+      }
+    },
+    "jalen williams": {
+      "rebounds": {
+        "3.5": {
+          "pinnacle_true_prob": 0.5646164478230822,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      }
+    },
+    "james harden": {
+      "points": {
+        "18.5": {
+          "pinnacle_true_prob": 0.5064960374171755,
+          "pinnacle_line": 18.5,
+          "dk_line": 18.5
+        }
+      },
+      "assists": {
+        "6.5": {
+          "pinnacle_true_prob": 0.4225258024650122,
+          "pinnacle_line": 6.5,
+          "dk_line": 6.5
+        }
+      }
+    },
+    "jared mccain": {
+      "rebounds": {
+        "2.5": {
+          "pinnacle_true_prob": 0.5121511604358217,
+          "pinnacle_line": 2.5,
+          "dk_line": 2.5
+        }
+      }
+    },
+    "jarrett allen": {
+      "points": {
+        "12.5": {
+          "pinnacle_true_prob": 0.5161610067229787,
+          "pinnacle_line": 12.5,
+          "dk_line": 12.5
+        }
+      },
+      "rebounds": {
+        "7.5": {
+          "pinnacle_true_prob": 0.5342156560993125,
+          "pinnacle_line": 7.5,
+          "dk_line": 7.5
+        }
+      },
+      "assists": {
+        "1.5": {
+          "pinnacle_true_prob": 0.38642009384487996,
+          "pinnacle_line": 1.5,
+          "dk_line": null
+        }
+      }
+    },
+    "jaylon tyson": {
+      "points": {
+        "3.5": {
+          "pinnacle_true_prob": 0.487517163899638,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        },
+        "2.5": {
+          "pinnacle_true_prob": 0.5195490681610844,
+          "pinnacle_line": 2.5,
+          "dk_line": null
+        }
+      },
+      "rebounds": {
+        "1.5": {
+          "pinnacle_true_prob": 0.5343073571442847,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      },
+      "assists": {
+        "0.5": {
+          "pinnacle_true_prob": 0.5411245353159851,
+          "pinnacle_line": 0.5,
+          "dk_line": 0.5
+        }
+      }
+    },
+    "jose alvarado": {
+      "points": {
+        "1.5": {
+          "pinnacle_true_prob": 0.5351457951824201,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      }
+    },
+    "julian champagnie": {
+      "assists": {
+        "1.5": {
+          "pinnacle_true_prob": 0.41432606064367955,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      },
+      "rebounds": {
+        "5.5": {
+          "pinnacle_true_prob": 0.4788135593220338,
+          "pinnacle_line": 5.5,
+          "dk_line": 5.5
+        }
+      }
+    },
+    "karlanthony towns": {
+      "rebounds": {
+        "11.5": {
+          "pinnacle_true_prob": 0.5161610067229787,
+          "pinnacle_line": 11.5,
+          "dk_line": 11.5
+        }
+      },
+      "assists": {
+        "4.5": {
+          "pinnacle_true_prob": 0.5411245353159851,
+          "pinnacle_line": 4.5,
+          "dk_line": 4.5
+        }
+      },
+      "points": {
+        "17.5": {
+          "pinnacle_true_prob": 0.5166631951676735,
+          "pinnacle_line": 17.5,
+          "dk_line": 17.5
+        }
+      }
+    },
+    "landry shamet": {
+      "assists": {
+        "0.5": {
+          "pinnacle_true_prob": 0.6156081580894007,
+          "pinnacle_line": 0.5,
+          "dk_line": 0.5
+        }
+      },
+      "points": {
+        "5.5": {
+          "pinnacle_true_prob": 0.5086640097036909,
+          "pinnacle_line": 5.5,
+          "dk_line": 5.5
+        }
+      },
+      "rebounds": {
+        "1.5": {
+          "pinnacle_true_prob": 0.42146580014156115,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      }
+    },
+    "luguentz dort": {
+      "assists": {
+        "0.5": {
+          "pinnacle_true_prob": 0.5705274459804053,
+          "pinnacle_line": 0.5,
+          "dk_line": 0.5
+        }
+      },
+      "rebounds": {
+        "2.5": {
+          "pinnacle_true_prob": 0.4928711096627016,
+          "pinnacle_line": 2.5,
+          "dk_line": 2.5
+        }
+      }
+    },
+    "max strus": {
+      "points": {
+        "9.5": {
+          "pinnacle_true_prob": 0.5118381403357727,
+          "pinnacle_line": 9.5,
+          "dk_line": 9.5
+        }
+      },
+      "rebounds": {
+        "4.5": {
+          "pinnacle_true_prob": 0.5064960374171755,
+          "pinnacle_line": 4.5,
+          "dk_line": 4.5
+        }
+      },
+      "assists": {
+        "2.5": {
+          "pinnacle_true_prob": 0.3890628600864885,
+          "pinnacle_line": 2.5,
+          "dk_line": 2.5
+        }
+      }
+    },
+    "miles mcbride": {
+      "assists": {
+        "1.5": {
+          "pinnacle_true_prob": 0.3723614125073979,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      },
+      "points": {
+        "5.5": {
+          "pinnacle_true_prob": 0.47515089251316295,
+          "pinnacle_line": 5.5,
+          "dk_line": 5.5
+        }
+      },
+      "rebounds": {
+        "1.5": {
+          "pinnacle_true_prob": 0.3763325823463518,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      }
+    },
+    "mitchell robinson": {
+      "assists": {
+        "0.5": {
+          "pinnacle_true_prob": 0.41058394160583944,
+          "pinnacle_line": 0.5,
+          "dk_line": 0.5
+        }
+      },
+      "points": {
+        "3.5": {
+          "pinnacle_true_prob": 0.510397604391948,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      },
+      "rebounds": {
+        "4.5": {
+          "pinnacle_true_prob": 0.5203045685279188,
+          "pinnacle_line": 4.5,
+          "dk_line": 4.5
+        }
+      }
+    },
+    "sam merrill": {
+      "points": {
+        "8.5": {
+          "pinnacle_true_prob": 0.5,
+          "pinnacle_line": 8.5,
+          "dk_line": 8.5
+        }
+      },
+      "rebounds": {
+        "1.5": {
+          "pinnacle_true_prob": 0.48173997727641615,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      },
+      "assists": {
+        "1.5": {
+          "pinnacle_true_prob": 0.42372881355932207,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      }
+    },
+    "shai gilgeousalexander": {
+      "rebounds": {
+        "3.5": {
+          "pinnacle_true_prob": 0.5705274459804053,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      }
+    },
+    "stephon castle": {
+      "rebounds": {
+        "5.5": {
+          "pinnacle_true_prob": 0.47268091306459453,
+          "pinnacle_line": 5.5,
+          "dk_line": 5.5
+        }
+      }
+    },
+    "victor wembanyama": {
+      "assists": {
+        "3.5": {
+          "pinnacle_true_prob": 0.4636601410794958,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      },
+      "rebounds": {
+        "13.5": {
+          "pinnacle_true_prob": 0.4636601410794958,
+          "pinnacle_line": 13.5,
+          "dk_line": 13.5
+        }
+      }
+    },
+    "donovan mitchell": {
+      "assists": {
+        "4.5": {
+          "pinnacle_true_prob": 0.42713817423264133,
+          "pinnacle_line": 4.5,
+          "dk_line": 4.5
+        }
+      },
+      "points": {
+        "27.5": {
+          "pinnacle_true_prob": 0.47823563551944287,
+          "pinnacle_line": 27.5,
+          "dk_line": 27.5
+        }
+      }
+    },
+    "evan mobley": {
+      "assists": {
+        "3.5": {
+          "pinnacle_true_prob": 0.5161610067229787,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      },
+      "points": {
+        "16.5": {
+          "pinnacle_true_prob": 0.5064960374171755,
+          "pinnacle_line": 16.5,
+          "dk_line": 16.5
+        }
+      }
+    },
+    "jalen brunson": {
+      "assists": {
+        "6.5": {
+          "pinnacle_true_prob": 0.557854790204783,
+          "pinnacle_line": 6.5,
+          "dk_line": 6.5
+        }
+      },
+      "rebounds": {
+        "3.5": {
+          "pinnacle_true_prob": 0.39823008849557523,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      },
+      "points": {
+        "26.5": {
+          "pinnacle_true_prob": 0.5,
+          "pinnacle_line": 26.5,
+          "dk_line": null
+        }
+      }
+    },
+    "josh hart": {
+      "points": {
+        "12.5": {
+          "pinnacle_true_prob": 0.5043297540699689,
+          "pinnacle_line": 12.5,
+          "dk_line": 12.5
+        }
+      },
+      "rebounds": {
+        "7.5": {
+          "pinnacle_true_prob": 0.45964474914303516,
+          "pinnacle_line": 7.5,
+          "dk_line": 7.5
+        }
+      }
+    },
+    "mikal bridges": {
+      "assists": {
+        "2.5": {
+          "pinnacle_true_prob": 0.5522607163828538,
+          "pinnacle_line": 2.5,
+          "dk_line": 2.5
+        }
+      },
+      "rebounds": {
+        "3.5": {
+          "pinnacle_true_prob": 0.4699738903394255,
+          "pinnacle_line": 3.5,
+          "dk_line": 3.5
+        }
+      }
+    },
+    "og anunoby": {
+      "assists": {
+        "1.5": {
+          "pinnacle_true_prob": 0.597714552238806,
+          "pinnacle_line": 1.5,
+          "dk_line": 1.5
+        }
+      },
+      "points": {
+        "15.5": {
+          "pinnacle_true_prob": 0.4881618596642272,
+          "pinnacle_line": 15.5,
+          "dk_line": 15.5
+        }
+      },
+      "rebounds": {
+        "5.5": {
+          "pinnacle_true_prob": 0.4355168429472936,
+          "pinnacle_line": 5.5,
+          "dk_line": 5.5
+        }
+      }
+    }
+  }
+}

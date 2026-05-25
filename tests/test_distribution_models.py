@@ -7,9 +7,7 @@ import sys
 # Add root directory to python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.zinb_model import ZINBModel
-from models.volatility_tracker import VolatilityTracker
-from models.copula_engine import CopulaEngine
+from src.models import ZINBModel, VolatilityTracker, CopulaEngine
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(message)s')
 
@@ -31,6 +29,7 @@ def test_zinb():
     # Let's test the probability of scoring Over 19.5 points
     prob_over_19_5 = model.predict_over_probability(19.5)
     print(f"Probability of Over 19.5 points: {prob_over_19_5:.4f} (Expected: ~0.4 - 0.5)")
+    assert 0.3 <= prob_over_19_5 <= 0.6, f"ZINB probability {prob_over_19_5} out of bounds"
 
 def test_garch():
     print("\n==================================================")
@@ -45,6 +44,7 @@ def test_garch():
     tracker.fit(pd.Series(returns))
     forecasted_var = tracker.forecast_variance()
     print(f"Forecasted Variance for next game: {forecasted_var:.4f}")
+    assert forecasted_var > 0, "GARCH forecasted variance is not positive"
 
 def test_copula():
     print("\n==================================================")
@@ -80,6 +80,9 @@ def test_copula():
     
     if joint_over > naive_over:
          print("\n--> Edge identified! The sportsbooks (assuming independence) are undervaluing the OVER/OVER correlation.")
+    
+    assert 0.0 <= joint_under <= 1.0, f"Copula joint under probability {joint_under} out of bounds"
+    assert 0.0 <= joint_over <= 1.0, f"Copula joint over probability {joint_over} out of bounds"
 
 if __name__ == "__main__":
     try:

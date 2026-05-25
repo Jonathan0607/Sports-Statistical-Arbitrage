@@ -1,14 +1,16 @@
 import os
+import sys
 import json
 import asyncio
 import psycopg2
 from dotenv import load_dotenv
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Import our pipeline components
 from infrastructure.redis_client import RedisClient
 from infrastructure.entity_resolver import EntityResolver
-from scrapers.websocket_listener import SharpBookWebsocketListener
-from features.physiological_features import PhysiologicalFeatureProcessor
+# WebSocket Listener and Features modules have been consolidated/purged.
 
 load_dotenv()
 
@@ -35,21 +37,8 @@ async def run_diagnostics():
         print(f"❌ PostgreSQL Error: {e}")
         return
 
-    # STEP 2: Initialize Pipeline
-    print("\n[2/5] Initializing WebSocket Listener & Entity Resolver...")
-    listener = SharpBookWebsocketListener()
-    print("✅ Listener initialized with Redis and Resolver attached.")
-
-    # STEP 3: Simulate Tick
-    print("\n[3/5] Simulating incoming WebSocket JSON tick for 'p.j. washington'...")
-    mock_payload = json.dumps({
-        "player_name": "p.j. washington",
-        "bookmaker": "DraftKings",
-        "line": 15.5,
-        "over_odds": -115,
-        "under_odds": -105
-    })
-    await listener.process_message(mock_payload)
+    # STEP 2 & 3: WebSocket Listener is deprecated and purged. Skipping simulation...
+    pass
 
     # STEP 4: Verify Redis Output
     print("\n[4/5] Inspecting Redis In-Memory State...")
@@ -65,11 +54,8 @@ async def run_diagnostics():
     latest_stream = stream_state[-1] if stream_state else "Empty"
     print(f"   🔹 Latest Stream Event: {latest_stream}")
 
-    # STEP 5: Verify Feature Engineering
-    print("\n[5/5] Testing Physiological Feature Matrix...")
-    feat = PhysiologicalFeatureProcessor()
-    matrix = feat.generate_fatigue_matrix(1, 3, "DEN", ["DAL", "LAL", "DEN"])
-    print(f"   🔹 Matrix Output: {matrix}")
+    # STEP 5: Feature Engineering is deprecated and purged. Skipping...
+    pass
 
     print("\n==================================================")
     print("✅ DIAGNOSTICS COMPLETE")

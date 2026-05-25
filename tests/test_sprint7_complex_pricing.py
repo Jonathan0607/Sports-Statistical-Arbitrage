@@ -5,9 +5,8 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.garch_volatility import PlayerVolatilityTracker
-from models.copula_pricing import SGPCorrelationEngine
-from execution.jump_diffusion import StochasticMarketMonitor
+from src.models import PlayerVolatilityTracker, SGPCorrelationEngine
+from src.models import StochasticMarketMonitor
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(message)s')
 
@@ -31,10 +30,7 @@ def test_garch():
     print(f"Variance under Stable Regime: {stable_var:.4f}")
     print(f"Variance under Volatile Regime: {volatile_var:.4f}")
     
-    if volatile_var > stable_var:
-        print("--> Success! GARCH correctly identified the volatility expansion.")
-    else:
-        print("--> Failed! GARCH did not widen the variance tails.")
+    assert volatile_var > stable_var, "GARCH did not detect the volatility expansion"
 
 def test_copula():
     print("\n==================================================")
@@ -55,6 +51,7 @@ def test_copula():
     print(f"Naive Independent Joint Probability: {naive_prob:.4f}")
     print(f"Copula Joint Probability (Tau={tau}): {joint_prob:.4f}")
     print("--> Copula correctly prices the correlated SGP legs higher than naive independence.")
+    assert joint_prob > naive_prob, "Copula did not price the correlated SGP legs higher"
 
 def test_jump_diffusion():
     print("\n==================================================")
@@ -74,8 +71,7 @@ def test_jump_diffusion():
     print("\nTick 2: Line violently gaps from 50% to 65% (News Catalyst)")
     is_jump_2 = monitor.detect_overreaction(current_implied_prob=0.65, ou_mean=ou_mean, time_step_dt=time_step)
     
-    if not is_jump_1 and is_jump_2:
-        print("\n--> Success! Monitor filtered noise and successfully flagged the structural jump-diffusion overreaction.")
+    assert not is_jump_1 and is_jump_2, "Monitor failed to correctly identify the jump vs noise"
 
 if __name__ == "__main__":
     try:

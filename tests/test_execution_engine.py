@@ -4,9 +4,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from execution.shins_method import ShinDevigger
-from execution.ev_engine import EVCalculator
-from execution.middle_identifier import MiddleScanner
+from src.models import ShinDevigger, EVCalculator, MiddleScanner
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(message)s')
 
@@ -26,11 +24,15 @@ def test_shin():
     print(f"Shin True Probs: {true_probs[0]:.4f}, {true_probs[1]:.4f} (Sum: {sum(true_probs):.4f})")
     
     assert abs(sum(true_probs) - 1.0) < 1e-4, "Shin true probabilities must sum to 1.0"
-    return true_probs[0] # Return the true over prob for the next test
 
-def test_ev(true_over_prob):
+def test_ev():
     print("\n==================================================")
     print("--- Testing EV & Kelly Engine ---")
+    
+    # Calculate true prob via ShinDevigger
+    american_odds = [-150, 120]
+    true_probs = ShinDevigger.devig(american_odds)
+    true_over_prob = true_probs[0]
     
     # Suppose DraftKings is offering the Over at +110
     dk_odds = 110
@@ -38,10 +40,12 @@ def test_ev(true_over_prob):
     ev = EVCalculator.calculate_ev(true_over_prob, dk_odds)
     print(f"True Prob: {true_over_prob:.4f} vs Offered Odds: {dk_odds}")
     print(f"Expected Value: {ev:.4%} (+EV)" if ev > 0 else f"Expected Value: {ev:.4%} (-EV)")
+    assert ev > 0.05, f"Expected EV is lower than expected: {ev}"
     
     # Calculate Quarter Kelly
     q_kelly = EVCalculator.calculate_fractional_kelly(true_over_prob, dk_odds, fraction=0.25)
     print(f"Recommended Quarter-Kelly Stake: {q_kelly:.2%} of bankroll")
+    assert 0.0 < q_kelly < 0.05, f"Expected Kelly stake {q_kelly} out of bounds"
 
 def test_middles():
     print("\n==================================================")
@@ -69,11 +73,16 @@ def test_middles():
         else:
             print(f"  Middle Gap: {opp['middle_gap']} points")
         print()
+        
+    assert len(opportunities) >= 2, f"Expected at least 2 opportunities, found {len(opportunities)}"
+    types = [opp['type'] for opp in opportunities]
+    assert 'PURE_ARBITRAGE' in types, "Expected PURE_ARBITRAGE opportunity to be flagged"
+    assert 'MIDDLE' in types, "Expected MIDDLE opportunity to be flagged"
 
 if __name__ == "__main__":
     try:
-        p_over = test_shin()
-        test_ev(p_over)
+        test_shin()
+        test_ev()
         test_middles()
         print("✅ All Execution Engine Tests Passed Diagnostics.")
     except Exception as e:

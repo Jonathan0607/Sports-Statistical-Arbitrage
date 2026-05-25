@@ -1,14 +1,12 @@
 import numpy as np
+import pandas as pd
 import logging
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.tree_projections import PlayerProjectionModel
-from models.calibration import ProbabilityCalibrator
-from models.zinb_model import ZINBModel
-from execution.ev_engine import EVCalculator
+from src.models import PlayerProjectionModel, ProbabilityCalibrator, ZINBModel, EVCalculator
 
 logging.basicConfig(level=logging.INFO, format='%(name)s - %(message)s')
 
@@ -52,6 +50,7 @@ def test_isotonic_regression():
     raw_50 = 0.50
     calibrated_50 = calibrator.calibrate(raw_50)
     print(f"Raw Prob: {raw_50:.2f} -> Calibrated Prob: {calibrated_50:.4f}")
+    assert 0.0 <= calibrated_50 <= 1.0, f"Calibrated probability {calibrated_50} is out of bounds"
 
 def test_zinb_conditioning():
     print("\n==================================================")
