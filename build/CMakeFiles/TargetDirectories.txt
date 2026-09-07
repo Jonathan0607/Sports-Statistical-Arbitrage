@@ -1,0 +1,3 @@
+/Users/kingebenezer/Desktop/Coding/Projects/Statistical Arbitrage/build/CMakeFiles/quant_core.dir
+/Users/kingebenezer/Desktop/Coding/Projects/Statistical Arbitrage/build/CMakeFiles/edit_cache.dir
+/Users/kingebenezer/Desktop/Coding/Projects/Statistical Arbitrage/build/CMakeFiles/rebuild_cache.dir

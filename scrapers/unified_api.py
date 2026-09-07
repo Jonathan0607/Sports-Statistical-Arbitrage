@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # Ensure root directory is in python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.models import ShinDevigger
+from src.models import ShinDevigger, MarketMicrostructure
 from infrastructure.entity_resolver import clean_player_name
 
 logging.basicConfig(
@@ -35,9 +35,7 @@ PARLAY_API_BASE = "https://api.parlay-api.com/v1"
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sharp_cache.json")
 # ACCEPTED MRM RISK (R-03): TTL maintained at 3 hours to enforce 1,000/month API credit budget.
 # Stale line risk is mitigated downstream by the $100 liquidity requirement on real-time prediction market anchors.
-CACHE_TTL_MINUTES = 180
-MONTHLY_BUDGET = 1000
-BUDGET_WARNING_THRESHOLD = 900
+CACHE_TTL_MINUTES = 30
 
 
 class SharpLineProvider:
@@ -54,14 +52,47 @@ class SharpLineProvider:
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         load_dotenv(dotenv_path=os.path.join(root_dir, ".env"))
 
-        self.api_key = os.getenv("PARLAY_API_KEY", "")
-        if self.api_key:
-            logger.info("PARLAY_API_KEY successfully detected.")
+        self.api_keys = self._load_keys()
+        self.cache_ttl_minutes = CACHE_TTL_MINUTES
+
+    @property
+    def api_key(self) -> str:
+        return self.api_keys[0] if self.api_keys else ""
+
+    @api_key.setter
+    def api_key(self, value: str):
+        if not value:
+            self.api_keys = []
         else:
-            logger.critical(
-                "PARLAY_API_KEY not found in environment (status: NOT DETECTED). "
-                "Sharp line provider will degrade gracefully and return empty data."
-            )
+            self.api_keys = [value]
+
+    def _load_keys(self) -> list:
+        """Dynamically loads all available keys from the .env file."""
+        keys = []
+        for i in range(1, 10):
+            key = os.getenv(f"PARLAY_API_KEY_{i}")
+            if key:
+                keys.append(key)
+                
+        # Fallback for legacy configuration
+        if not keys:
+            legacy_key = os.getenv("PARLAY_API_KEY")
+            if legacy_key:
+                keys.append(legacy_key)
+                
+        if keys:
+            logger.info(f"Loaded {len(keys)} ParlayAPI keys for round-robin rotation.")
+        else:
+            logger.error("No PARLAY_API_KEYs found in environment.")
+        return keys
+
+    def _get_next_key(self, cache_data: dict) -> tuple[str, int]:
+        """Determines the next API key in the rotation."""
+        if not self.api_keys:
+            return "", -1
+        last_index = cache_data.get("last_key_index", -1)
+        next_index = (last_index + 1) % len(self.api_keys)
+        return self.api_keys[next_index], next_index
 
     # ══════════════════════════════════════════════════════════
     # CACHE MANAGEMENT
@@ -85,7 +116,7 @@ class SharpLineProvider:
     def load_cache(self) -> dict | None:
         """
         Reads sharp_cache.json and returns the cached data if it exists
-        and is less than 45 minutes old. Returns None if stale or missing.
+        and is less than 30 minutes old. Returns None if stale or missing.
         """
         try:
             if not Path(CACHE_FILE).exists():
@@ -104,10 +135,10 @@ class SharpLineProvider:
             age = datetime.now(timezone.utc) - fetched_at
             age_minutes = age.total_seconds() / 60.0
 
-            if age_minutes < CACHE_TTL_MINUTES:
+            if age_minutes < self.cache_ttl_minutes:
                 logger.info(
                     f"Sharp cache is fresh ({age_minutes:.1f} min old, "
-                    f"TTL={CACHE_TTL_MINUTES} min). Returning cached data."
+                    f"TTL={self.cache_ttl_minutes} min). Returning cached data."
                 )
                 return self._deserialize_lines(cache.get("lines", {}))
             else:
@@ -121,17 +152,18 @@ class SharpLineProvider:
             logger.error(f"Failed to parse sharp_cache.json: {e}. Treating as stale.")
             return None
 
-    def save_cache(self, lines: dict, api_calls_this_month: int):
+    def save_cache(self, lines: dict, api_calls_this_month: int, last_key_index: int):
         """Writes devigged sharp lines + metadata to sharp_cache.json."""
         cache = {
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "api_calls_this_month": api_calls_this_month,
+            "last_key_index": last_key_index,
             "lines": lines,
         }
         try:
             with open(CACHE_FILE, 'w') as f:
                 json.dump(cache, f, indent=2)
-            logger.info(f"Sharp cache saved ({len(lines)} player entries).")
+            logger.info(f"Sharp cache saved ({len(lines)} player entries, key index {last_key_index}).")
         except Exception as e:
             logger.error(f"Failed to save sharp_cache.json: {e}")
 
@@ -160,54 +192,85 @@ class SharpLineProvider:
     # API FETCH + DEVIG
     # ══════════════════════════════════════════════════════════
 
-    async def fetch_sharp_lines(self, sport: str = "basketball_nba") -> dict:
+    async def fetch_sharp_lines(self, api_key: str = None, sport: str = "basketball_nba") -> dict:
         """
         Fetches player prop lines from ParlayAPI for Pinnacle and DraftKings.
         Devigs Pinnacle odds using Shin's method.
         Returns {player_name: {stat_type: {line: {pinnacle_true_prob, pinnacle_line, dk_line}}}}.
-
-        Raises CriticalAPIError on 403/429.
         """
-        if not self.api_key:
-            logger.warning("No PARLAY_API_KEY. Returning empty sharp lines.")
+        # Determine keys to try
+        if api_key is not None:
+            keys_to_try = [api_key]
+        else:
+            keys_to_try = self.api_keys
+
+        if not keys_to_try:
+            logger.critical("No ParlayAPI keys resolved/provided. Returning empty sharp lines.")
             return {}
 
         url = f"{PARLAY_API_BASE}/sports/{sport}/props"
-        headers = {"x-api-key": self.api_key}
         params = {
             "bookmakers": "pinnacle,draftkings",
             "markets": "player_points,player_rebounds,player_assists",
         }
 
         async with httpx.AsyncClient(timeout=15.0) as client:
-            try:
-                resp = await client.get(url, headers=headers, params=params)
+            for idx, key in enumerate(keys_to_try, start=1):
+                try:
+                    logger.info(f"Attempting to refresh sharp lines using API Key #{idx}...")
+                    headers = {"x-api-key": key}
+                    resp = await client.get(url, headers=headers, params=params)
 
-                if resp.status_code == 403:
-                    raise CriticalAPIError(
-                        f"ParlayAPI returned 403 Forbidden. "
-                        f"API key may be invalid or revoked. Response: {resp.text[:300]}"
-                    )
-                elif resp.status_code == 429:
-                    raise CriticalAPIError(
-                        f"ParlayAPI returned 429 Rate Limited. "
-                        f"Monthly quota likely exceeded. Response: {resp.text[:300]}"
-                    )
-                elif resp.status_code != 200:
-                    logger.error(
-                        f"ParlayAPI returned unexpected status {resp.status_code}: "
-                        f"{resp.text[:300]}"
-                    )
-                    return {}
+                    if resp.status_code == 200:
+                        logger.info(f"Successfully refreshed sharp lines using API Key #{idx}.")
+                        data = resp.json()
+                        if api_key is None:
+                            self.last_successful_key_index = idx - 1
+                        else:
+                            try:
+                                self.last_successful_key_index = self.api_keys.index(key)
+                            except ValueError:
+                                self.last_successful_key_index = 0
+                        return self._parse_and_devig(data)
 
-                data = resp.json()
-                return self._parse_and_devig(data)
+                    elif resp.status_code == 403:
+                        try:
+                            resp_json = resp.json()
+                            error_msg = resp_json.get("detail", {}).get("message", "")
+                        except Exception:
+                            error_msg = resp.text
 
-            except CriticalAPIError:
-                raise  # Always propagate critical errors to public wrapper
-            except Exception as e:
-                logger.error(f"ParlayAPI request failed: {e}")
-                return {}
+                        if "Credit limit exceeded" in error_msg:
+                            logger.warning(
+                                f"⚠️ API Key #{idx} exhausted (Credit limit exceeded). "
+                                f"Attempting failover to next available key..."
+                            )
+                            continue  # Try next key
+                        else:
+                            logger.warning(
+                                f"⚠️ API Key #{idx} returned 403 Forbidden: {error_msg}. "
+                                f"Attempting failover to next available key..."
+                            )
+                            continue
+
+                    elif resp.status_code == 429:
+                        logger.warning(
+                            f"⚠️ API Key #{idx} rate limited (HTTP 429). "
+                            f"Attempting failover to next available key..."
+                        )
+                        continue
+
+                    else:
+                        logger.error(f"Unexpected API response from Key #{idx}: {resp.status_code}")
+                        continue
+
+                except Exception as e:
+                    logger.error(f"Network error during sharp lines fetch with Key #{idx}: {str(e)}")
+                    continue
+
+        # If all keys failed
+        logger.critical("🚨 Graceful degradation: All available ParlayAPI keys failed or exhausted. Returning empty dict.")
+        return {}
 
     def _parse_and_devig(self, raw_data: list) -> dict:
         """
@@ -231,6 +294,10 @@ class SharpLineProvider:
         lines = {}
         if not isinstance(raw_data, list):
             raw_data = raw_data.get("data", []) if isinstance(raw_data, dict) else []
+
+        # Print the raw count of players retrieved from the API before EntityResolver touches them
+        raw_players = {entry.get("player") for entry in raw_data if entry.get("player")}
+        print(f"RAW PLAYER COUNT FROM API: {len(raw_players)}")
 
         # Group records by (player_clean, stat_type, line_val)
         grouped = {}
@@ -286,8 +353,8 @@ class SharpLineProvider:
                 over_american = int(over_price) if isinstance(over_price, (int, float)) and abs(over_price) > 5.0 else self._decimal_to_american(float(over_price))
                 under_american = int(under_price) if isinstance(under_price, (int, float)) and abs(under_price) > 5.0 else self._decimal_to_american(float(under_price))
 
-                true_probs = ShinDevigger.devig([over_american, under_american])
-                true_prob = true_probs[0]  # Over probability
+                shin_res = MarketMicrostructure.shins_method(over_american, under_american)
+                true_prob = shin_res["true_prob_over"]
             except Exception as e:
                 logger.debug(f"Devig failed for {player_clean} {stat_type} line {line_val}: {e}")
                 continue
@@ -329,13 +396,22 @@ class SharpLineProvider:
 
     @staticmethod
     def _decimal_to_american(decimal_odds: float) -> int:
-        """Converts decimal odds to American odds."""
+        """
+        Translates decimal odds into bounded American Odds.
+        Clamps boundaries to stay cleanly within standard 4-byte database types.
+        """
+        MAX_SQL_INT = 2000000000
+        
+        # Ensure invalid decimals don't crash the calculation
+        if decimal_odds <= 1.0:
+            return MAX_SQL_INT  
+            
         if decimal_odds >= 2.0:
-            return int(round((decimal_odds - 1.0) * 100))
-        elif decimal_odds > 1.0:
-            return int(round(-100.0 / (decimal_odds - 1.0)))
+            odds = (decimal_odds - 1.0) * 100.0
         else:
-            return -110  # Fallback
+            odds = -100.0 / (decimal_odds - 1.0)
+            
+        return max(-MAX_SQL_INT, min(int(round(odds)), MAX_SQL_INT))
 
     # ══════════════════════════════════════════════════════════
     # PUBLIC ENTRY POINT
@@ -345,44 +421,60 @@ class SharpLineProvider:
         """
         The primary entry point. Returns devigged sharp lines.
 
-        1. Try cache first. If fresh (< 45 min), return immediately.
-        2. If stale/missing, fetch from API, devig, cache, return.
+        1. Try cache first. If fresh (< 30 min), return immediately.
+        2. If stale/missing, fetch from API using the next rotated key, devig, cache, return.
         3. On CriticalAPIError or other failures, return empty dict for graceful degradation.
         """
+        if not self.api_keys:
+            logger.warning("No ParlayAPI keys loaded. Returning empty sharp lines.")
+            return {}
+
         # Step 1: Check cache
         cached = self.load_cache()
         if cached is not None:
             return cached
 
+        # Read cache_data for monthly count and last key index
+        cache_data = {}
+        if os.path.exists(CACHE_FILE):
+            try:
+                with open(CACHE_FILE, 'r') as f:
+                    cache_data = json.load(f)
+            except Exception:
+                pass
+
         # Step 2: Check budget
         call_count = self._get_monthly_call_count()
-        if call_count >= MONTHLY_BUDGET:
+        monthly_budget = len(self.api_keys) * 1000
+        budget_warning_threshold = int(monthly_budget * 0.9)
+        if call_count >= monthly_budget:
             logger.critical(
-                f"MONTHLY API BUDGET EXHAUSTED ({call_count}/{MONTHLY_BUDGET}). "
+                f"MONTHLY API BUDGET EXHAUSTED ({call_count}/{monthly_budget}). "
                 f"Returning stale/empty cache. NO API call will be made."
             )
             # Try to return stale data from cache file even if expired
             try:
-                with open(CACHE_FILE, 'r') as f:
-                    cache = json.load(f)
-                return self._deserialize_lines(cache.get("lines", {}))
+                return self._deserialize_lines(cache_data.get("lines", {}))
             except Exception:
                 return {}
 
-        if call_count >= BUDGET_WARNING_THRESHOLD:
+        if call_count >= budget_warning_threshold:
             logger.critical(
-                f"⚠️  API BUDGET WARNING: {call_count}/{MONTHLY_BUDGET} calls used this month. "
-                f"Only {MONTHLY_BUDGET - call_count} remaining!"
+                f"⚠️  API BUDGET WARNING: {call_count}/{monthly_budget} calls used this month. "
+                f"Only {monthly_budget - call_count} remaining!"
             )
 
-        # Step 3: Fetch from API
+        # Step 3: Fetch from API using the key pool (starting from index 0/Key 1)
+        logger.info("Sharp cache expired/missing. Fetching fresh lines from ParlayAPI sequential pool...")
         try:
+            self.last_successful_key_index = 0
             lines = await self.fetch_sharp_lines()
             new_call_count = call_count + 1
-            self.save_cache(lines, new_call_count)
+            succeeded_index = getattr(self, 'last_successful_key_index', 0)
+            self.save_cache(lines, new_call_count, succeeded_index)
             logger.info(
                 f"Sharp lines refreshed from ParlayAPI. "
-                f"API calls this month: {new_call_count}/{MONTHLY_BUDGET}"
+                f"API calls this month: {new_call_count}/{monthly_budget}"
             )
             return lines
         except Exception as e:
@@ -398,35 +490,69 @@ class SharpLineProvider:
         Forces an immediate synchronous API call to ParlayAPI to seed the cache.
         Returns parsed/devigged lines, and saves them to sharp_cache.json.
         """
-        if not self.api_key:
-            logger.critical("PARLAY_API_KEY missing. Cannot force seed sharp cache.")
+        keys_to_try = self.api_keys
+        if not keys_to_try:
+            logger.critical("No ParlayAPI keys available. Cannot force seed sharp cache.")
             return {}
 
         url = f"{PARLAY_API_BASE}/sports/basketball_nba/props"
-        headers = {"x-api-key": self.api_key}
         params = {
             "bookmakers": "pinnacle,draftkings",
             "markets": "player_points,player_rebounds,player_assists",
         }
-        logger.info("Forcing synchronous ParlayAPI call to seed sharp cache on boot...")
-        try:
-            with httpx.Client(timeout=15.0) as client:
-                resp = client.get(url, headers=headers, params=params)
-                if resp.status_code != 200:
-                    logger.critical(f"ParlayAPI sync seed failed with status {resp.status_code}: {resp.text[:300]}")
-                    return {}
 
-                raw_data = resp.json()
-                lines = self._parse_and_devig(raw_data)
+        with httpx.Client(timeout=15.0) as client:
+            for idx, key in enumerate(keys_to_try, start=1):
+                try:
+                    logger.info(f"Forcing synchronous ParlayAPI call using API Key #{idx}...")
+                    headers = {"x-api-key": key}
+                    resp = client.get(url, headers=headers, params=params)
 
-                # Increment and save cache call count
-                call_count = self._get_monthly_call_count()
-                self.save_cache(lines, call_count + 1)
-                logger.info(f"Successfully seeded sharp cache with {len(lines)} players.")
-                return lines
-        except Exception as e:
-            logger.critical(f"Exception during synchronous cache seeding: {e}. Returning empty dictionary.")
-            return {}
+                    if resp.status_code == 200:
+                        logger.info(f"Successfully force-seeded sharp cache using API Key #{idx}.")
+                        raw_data = resp.json()
+                        lines = self._parse_and_devig(raw_data)
+                        call_count = self._get_monthly_call_count()
+                        self.save_cache(lines, call_count + 1, idx - 1)
+                        return lines
+
+                    elif resp.status_code == 403:
+                        try:
+                            resp_json = resp.json()
+                            error_msg = resp_json.get("detail", {}).get("message", "")
+                        except Exception:
+                            error_msg = resp.text
+
+                        if "Credit limit exceeded" in error_msg:
+                            logger.warning(
+                                f"⚠️ Sync API Key #{idx} exhausted (Credit limit exceeded). "
+                                f"Attempting failover to next available key..."
+                            )
+                            continue
+                        else:
+                            logger.warning(
+                                f"⚠️ Sync API Key #{idx} returned 403 Forbidden: {error_msg}. "
+                                f"Attempting failover to next available key..."
+                            )
+                            continue
+
+                    elif resp.status_code == 429:
+                        logger.warning(
+                            f"⚠️ Sync API Key #{idx} rate limited (HTTP 429). "
+                            f"Attempting failover to next available key..."
+                        )
+                        continue
+
+                    else:
+                        logger.error(f"Unexpected sync API response from Key #{idx}: {resp.status_code}")
+                        continue
+
+                except Exception as e:
+                    logger.error(f"Network error during sync sharp lines fetch with Key #{idx}: {str(e)}")
+                    continue
+
+        logger.critical("🚨 Graceful degradation: All available ParlayAPI keys failed or exhausted during sync seed. Returning empty dict.")
+        return {}
 
 
 if __name__ == "__main__":
@@ -439,7 +565,7 @@ if __name__ == "__main__":
         print(f"  API Base:     {PARLAY_API_BASE}")
         print(f"  Cache File:   {CACHE_FILE}")
         print(f"  Cache TTL:    {CACHE_TTL_MINUTES} minutes")
-        print(f"  Monthly Cap:  {MONTHLY_BUDGET} calls")
+        print(f"  Monthly Cap:  {len(provider.api_keys) * 1000} calls")
         print("=" * 70 + "\n")
 
         try:
@@ -453,9 +579,11 @@ if __name__ == "__main__":
                         for line, data in lines_dict.items():
                             prob = data.get('pinnacle_true_prob')
                             prob_str = f"{prob*100:.1f}%" if prob else "N/A"
+                            dk_line = data.get('dk_line')
+                            dk_val_str = str(dk_line) if dk_line is not None else 'N/A'
                             print(f"  {player:<25} | {stat:<10} | "
                                   f"PIN: {line:<6} | "
-                                  f"DK: {data.get('dk_line', 'N/A'):<6} | "
+                                  f"DK: {dk_val_str:<6} | "
                                   f"True: {prob_str}")
                 print(f"\n{'─'*70}\n")
             else:

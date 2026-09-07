@@ -165,27 +165,19 @@ class KalshiClobClient:
     async def fetch_current_lines(self, session: AsyncSession) -> dict:
         url = f"{KALSHI_BASE_URL}/markets"
         parsed_props = {}
-        tasks = []
         for ticker in KALSHI_SERIES_TICKERS:
             params = {
                 "limit": "100",
                 "status": "open",
                 "series_ticker": ticker
             }
-            tasks.append(session.get(url, params=params))
-
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for ticker, resp in zip(KALSHI_SERIES_TICKERS, responses):
-            if isinstance(resp, Exception):
-                logger_kalshi.error(f"Error fetching Kalshi series {ticker}: {resp}")
-                continue
-
-            if resp.status_code != 200:
-                logger_kalshi.warning(f"Kalshi API returned {resp.status_code} for series {ticker}")
-                continue
-
             try:
+                resp = await session.get(url, params=params, headers=self.headers, timeout=10.0)
+                if resp.status_code != 200:
+                    logger_kalshi.warning(f"Kalshi API returned {resp.status_code} for series {ticker}")
+                    await asyncio.sleep(0.5)
+                    continue
+
                 data = resp.json()
                 markets = data.get("markets", [])
                 for m in markets:
@@ -225,7 +217,10 @@ class KalshiClobClient:
                                 "bid_liquidity_usd": bid_usd
                             }
             except Exception as e:
-                logger_kalshi.error(f"Error parsing Kalshi series {ticker} payload: {e}")
+                logger_kalshi.error(f"Error fetching/parsing Kalshi series {ticker}: {e}")
+
+            # The Micro-Sleep: Stagger requests by 0.5 seconds to respect rate limits
+            await asyncio.sleep(0.5)
 
         logger_kalshi.info(f"Retrieved {len(parsed_props)} active translated players from Kalshi.")
         return parsed_props
@@ -407,14 +402,14 @@ class PolymarketClobClient:
     async def fetch_book(self, session: AsyncSession, token_id: str) -> dict | None:
         try:
             url = f"{POLY_CLOB_URL}?token_id={token_id}"
-            resp = await session.get(url, timeout=5.0)
+            resp = await session.get(url, timeout=5.0, headers=self.headers)
             if resp.status_code == 200:
                 return resp.json()
         except Exception as e:
             logger_poly.debug(f"Error fetching Polymarket CLOB book for {token_id}: {e}")
         return None
 
-    async def fetch_current_lines(self, session: AsyncSession) -> dict:
+    async def fetch_current_lines(self, session: AsyncSession) -> dict | None:
         url = POLY_GAMMA_URL
         params = {
             "series_id": str(POLY_NBA_SERIES_ID),
@@ -424,15 +419,15 @@ class PolymarketClobClient:
 
         parsed_props = {}
         try:
-            resp = await session.get(url, params=params, timeout=10.0)
+            resp = await session.get(url, params=params, timeout=10.0, headers=self.headers)
             if resp.status_code != 200:
                 logger_poly.warning(f"Polymarket Gamma API returned status {resp.status_code}")
-                return {}
+                return None
 
             events = resp.json()
         except Exception as e:
             logger_poly.error(f"Failed to fetch Polymarket Gamma API: {e}")
-            return {}
+            return None
 
         markets_to_fetch = []
         for event in events:
@@ -599,7 +594,7 @@ class PolymarketClobClient:
 # UNDERDOG GHOST CLIENT
 # ══════════════════════════════════════════════════════════════════════════════
 logger_ud = logging.getLogger("UnderdogGhost")
-UD_REST_URL = "https://api.underdogfantasy.com/v1/over_under_lines"
+UD_REST_URL = "https://api.underdogfantasy.com/beta/v3/over_under_lines"
 UD_ORIGIN = "https://underdogfantasy.com"
 UD_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -675,27 +670,54 @@ class UnderdogGhostClient:
 
                 await asyncio.sleep(interval_seconds)
 
-    async def fetch_current_lines(self, session: AsyncSession) -> dict:
+    async def fetch_current_lines(self, session: AsyncSession = None) -> dict:
+        """
+        Bypasses Cloudflare WAF using TLS impersonation (Chrome 116).
+        """
+        url = UD_REST_URL
+        
+        # Jitter headers to avoid static fingerprinting
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+            "Host": "api.underdogfantasy.com",
+            "Origin": "https://underdogfantasy.com",
+            "Referer": "https://underdogfantasy.com/",
+            # Standardize on a highly common user agent
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+        }
+
         try:
-            resp = await session.get(UD_REST_URL)
-            if resp.status_code != 200:
-                logger_ud.warning(f"Underdog API returned {resp.status_code}")
-                return {}
-
-            raw = resp.json()
-            projections = self._parse_projections(raw)
-
-            parsed = {}
-            for p in projections:
-                parsed[p['id']] = {
-                    'player': p['player'],
-                    'prop': p['stat_display'],
-                    'line': p['line'],
-                    'odds_type': p.get('odds_type', 'standard')
-                }
-            return parsed
+            proxy_url = os.getenv("RESIDENTIAL_PROXY_URL")
+            proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            
+            async with AsyncSession(impersonate="chrome116", proxies=proxies) as local_session:
+                response = await local_session.get(url, headers=headers, timeout=15.0)
+                
+                if response.status_code == 200:
+                    raw_data = response.json()
+                    projections = self._parse_projections(raw_data)
+                    
+                    parsed = {}
+                    for p in projections:
+                        parsed[p['id']] = {
+                            'player': p['player'],
+                            'prop': p['stat_display'],
+                            'line': p['line'],
+                            'odds_type': p.get('odds_type', 'standard')
+                        }
+                    return parsed
+                elif response.status_code == 403:
+                    logger_ud.error("Cloudflare WAF Block (403). Impersonation failed or IP blacklisted.")
+                    return {}
+                else:
+                    logger_ud.warning(f"Underdog API returned {response.status_code}")
+                    return {}
+                    
         except Exception as e:
-            logger_ud.error(f"Underdog fetch error: {e}")
+            logger_ud.error(f"Network exception while fetching Underdog: {e}")
             return {}
 
     def _parse_projections(self, raw_json: dict) -> list:
@@ -707,6 +729,7 @@ class UnderdogGhostClient:
             players_map[pid] = {
                 "first_name": player.get("first_name", ""),
                 "last_name": player.get("last_name", ""),
+                "sport_id": player.get("sport_id", "")
             }
 
         appearances_map = {}
@@ -726,7 +749,16 @@ class UnderdogGhostClient:
 
             player_id = appearances_map.get(appearance_id, "")
             player_info = players_map.get(player_id, {})
+
+            # Strict League/Sport Filter: Only allow NBA
+            sport_id = str(player_info.get("sport_id", "")).strip().upper()
+            if sport_id != "NBA":
+                continue
+
             player_name_raw = f"{player_info.get('first_name', '')} {player_info.get('last_name', '')}".strip()
+            # Drop combo props instantly
+            if "+" in player_name_raw:
+                continue
             player_name = clean_player_name(player_name_raw) if player_name_raw else "Unknown"
 
             stat_value = (

@@ -1,0 +1,22 @@
+{
+  "target": "fg3m",
+  "stat_column": "three_pointers_made",
+  "target_type": "efficiency_per_48",
+  "best_alpha": 2.9091103410316923,
+  "best_depth": 5,
+  "features": [
+    "roll_min",
+    "roll_stat",
+    "roll_usg",
+    "days_rest",
+    "is_back_to_back",
+    "opp_def_rating",
+    "opp_pace_factor",
+    "opp_pos_pts_allowed",
+    "vacated_usage",
+    "roll_potential_assists",
+    "roll_touches",
+    "roll_defender_distance"
+  ],
+  "training_samples": 25406
+}

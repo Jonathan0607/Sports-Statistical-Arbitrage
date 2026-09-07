@@ -94,9 +94,40 @@ class RedisClient:
         self.client.xadd("stream:ticks:nba:points", stream_payload)
         self.client.xtrim("stream:ticks:nba:points", maxlen=10000)
 
+    def set_market_line(self, key: str, value: dict):
+        """Sets a complete JSON object in Redis under the specified key."""
+        try:
+            self.client.json().set(key, "$", value)
+        except Exception as e:
+            logger.error(f"Error setting JSON in Redis for key {key}: {e}")
+
+    def update_single_property(self, key: str, path: str, value):
+        """Updates a nested property inside a RedisJSON document."""
+        try:
+            self.client.json().set(key, path, value)
+        except Exception as e:
+            logger.error(f"Error updating JSON property in Redis for key {key}, path {path}: {e}")
+
+    def get_nested_odds(self, key: str, path: str = "$"):
+        """Retrieves a nested property or complete document from RedisJSON."""
+        try:
+            return self.client.json().get(key, path)
+        except Exception as e:
+            logger.error(f"Error getting JSON from Redis for key {key}, path {path}: {e}")
+            return None
+
+    def buffer_ev_signal(self, signal_data: dict):
+        """Pushes an EV signal onto a Redis queue (list) for background batch processing."""
+        import json
+        try:
+            self.client.rpush("queue:ev_signals_buffer", json.dumps(signal_data))
+        except Exception as e:
+            logger.error(f"Error buffering EV signal to Redis: {e}")
+
     def get_client(self) -> redis.Redis:
         """Retrieve direct redis-py client instance."""
         return self.client
+
 
 if __name__ == "__main__":
     # Self-test script when run directly

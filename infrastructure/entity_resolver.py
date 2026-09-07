@@ -16,9 +16,10 @@ def clean_player_name(name: str) -> str:
     normalized = unicodedata.normalize('NFKD', name)
     cleaned = normalized.encode('ascii', 'ignore').decode('utf-8')
     cleaned = cleaned.lower().strip()
-    cleaned = re.sub(r"[.'\-,]", "", cleaned)
+    # Strip suffixes (jr, sr, etc.) at word boundaries before removing spaces
     cleaned = re.sub(r"\b(jr|sr|ii|iii|iv)\b", "", cleaned)
-    cleaned = " ".join(cleaned.split())
+    # Aggressively strip hyphens, apostrophes (straight + curly), periods, commas, and spaces/whitespace
+    cleaned = re.sub(r"[.'\-,\s\u2018\u2019\u201C\u201D]", "", cleaned)
     return cleaned
 
 class EntityResolver:
@@ -37,13 +38,13 @@ class EntityResolver:
             cursor.execute("SELECT book_name, remote_player_name, master_player_id FROM player_mappings;")
             rows = cursor.fetchall()
             for book_name, remote_name, master_id in rows:
-                self.mapping_cache[(book_name.lower(), remote_name.lower())] = master_id
+                self.mapping_cache[(book_name.lower().strip(), clean_player_name(remote_name))] = master_id
             
             # Load players to build normalized name fallback cache
             cursor.execute("SELECT master_player_id, full_name FROM players;")
             players = cursor.fetchall()
             for pid, name in players:
-                norm_name = self.normalize_string(name)
+                norm_name = clean_player_name(name)
                 self.normalized_player_cache[norm_name] = pid
                 
             cursor.close()
@@ -62,22 +63,21 @@ class EntityResolver:
     def resolve_player(self, book_name: str, remote_name: str) -> str:
         """Resolves a book-specific player name string to our master_player_id."""
         book_clean = book_name.lower().strip()
-        name_clean = remote_name.lower().strip()
+        name_clean = clean_player_name(remote_name)
         
-        # Fast path: exact dictionary match
+        # Fast path: exact dictionary match (keys are already clean_player_name'd)
         if (book_clean, name_clean) in self.mapping_cache:
             return self.mapping_cache[(book_clean, name_clean)]
             
-        # Fallback path: normalized name match
-        normalized_name = self.normalize_string(remote_name)
-        if normalized_name in self.normalized_player_cache:
-            master_id = self.normalized_player_cache[normalized_name]
+        # Fallback path: normalized name match (keys are already clean_player_name'd)
+        if name_clean in self.normalized_player_cache:
+            master_id = self.normalized_player_cache[name_clean]
             # Cache the hit for next time
             self.mapping_cache[(book_clean, name_clean)] = master_id
             return master_id
             
         # Hard fallback: slugification
-        fallback_id = normalized_name.replace(" ", "_")
+        fallback_id = name_clean or remote_name.lower().replace(" ", "_")
         logger.warning(f"[UNRESOLVED ENTITY] Stale cache hit for '{remote_name}' on {book_name}. Defaulting to fallback ID: {fallback_id}")
         return fallback_id
 

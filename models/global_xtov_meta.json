@@ -1,0 +1,17 @@
+{
+  "target": "tov",
+  "stat_column": "turnovers",
+  "target_type": "residual",
+  "intercept": -0.023266015724051133,
+  "weights": [
+    0.47478357136215055,
+    0.4169132747369644
+  ],
+  "features": [
+    "xgb_residual",
+    "lgb_residual"
+  ],
+  "alpha": 0.03743443673943657,
+  "n_splits": 5,
+  "training_samples": 27926
+}

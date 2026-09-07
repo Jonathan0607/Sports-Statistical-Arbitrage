@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from unittest.mock import MagicMock
-from src.slip_builder import CorrelatedSlipEvaluator
+from src.execution import CorrelatedSlipEvaluator
 
 def test_determine_relationship_team_key():
     """Verify that team abbreviations are resolved directly from signal dictionaries if present."""
@@ -24,9 +24,9 @@ def test_determine_relationship_cached_game_logs():
         3: {201, 202, 203, 204},  # Player 3 (opponent: 0 overlap)
     }
     player_name_to_id = {
-        "lebron james": 1,
-        "anthony davis": 2,
-        "nikola jokic": 3
+        "lebronjames": 1,
+        "anthonydavis": 2,
+        "nikolajokic": 3
     }
     
     evaluator = CorrelatedSlipEvaluator(

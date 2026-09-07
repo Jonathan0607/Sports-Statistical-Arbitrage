@@ -2,7 +2,7 @@ import pytest
 import os
 import sys
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -13,12 +13,12 @@ from scrapers.hfp_poller import UnifiedRestPoller
 
 def test_clean_player_name_normalization():
     """Verify player names are correctly cleaned (accents stripped, lowercase, suffixes removed)."""
-    assert clean_player_name("Luka Dončić") == "luka doncic"
-    assert clean_player_name("Nikola Jokić") == "nikola jokic"
-    assert clean_player_name("LeBron James Jr.") == "lebron james"
-    assert clean_player_name("Jaren Jackson III") == "jaren jackson"
-    assert clean_player_name("Kenyon Martin Jr") == "kenyon martin"
-    assert clean_player_name("Robert Williams III") == "robert williams"
+    assert clean_player_name("Luka Dončić") == "lukadoncic"
+    assert clean_player_name("Nikola Jokić") == "nikolajokic"
+    assert clean_player_name("LeBron James Jr.") == "lebronjames"
+    assert clean_player_name("Jaren Jackson III") == "jarenjackson"
+    assert clean_player_name("Kenyon Martin Jr") == "kenyonmartin"
+    assert clean_player_name("Robert Williams III") == "robertwilliams"
     assert clean_player_name("") == ""
     assert clean_player_name(None) == ""
 
@@ -50,23 +50,23 @@ def test_half_point_hook_translation():
 
     # Kalshi style colon formats
     p1, s1, l1 = kalshi.parse_nba_contract("LeBron James: 20+ Points")
-    assert p1 == "lebron james"
+    assert p1 == "lebronjames"
     assert s1 == "Points"
     assert l1 == 19.5
 
     p2, s2, l2 = kalshi.parse_nba_contract("Nikola Jokic: 10 or more Rebounds")
-    assert p2 == "nikola jokic"
+    assert p2 == "nikolajokic"
     assert s2 == "Rebounds"
     assert l2 == 9.5
 
     # Polymarket style direct questions
     p3, s3, l3 = polymarket.parse_nba_contract("Will LeBron James record 20+ points?")
-    assert p3 == "lebron james"
+    assert p3 == "lebronjames"
     assert s3 == "Points"
     assert l3 == 19.5
 
     p4, s4, l4 = polymarket.parse_nba_contract("Will Nikola Jokic have 10 or more rebounds?")
-    assert p4 == "nikola jokic"
+    assert p4 == "nikolajokic"
     assert s4 == "Rebounds"
     assert l4 == 9.5
 
@@ -76,6 +76,14 @@ def test_strict_line_enforcement():
 
     async def run():
         poller = UnifiedRestPoller()
+        from unittest.mock import MagicMock, AsyncMock
+        poller.redis = MagicMock()
+        poller.redis.json = MagicMock()
+        poller.redis.json().get = AsyncMock(return_value=None)
+        poller.redis.json().set = AsyncMock()
+        poller.redis.hset = AsyncMock()
+        poller.redis.expire = AsyncMock()
+        poller.redis.rpush = AsyncMock()
         
         # Mock anchors: Jarrett Allen has a point line at 15.5 (prob=0.52)
         poller.anchors = {
@@ -129,7 +137,7 @@ def test_strict_line_enforcement():
         with patch.object(poller, '_fire_alert_and_save') as mock_fire:
             # We don't care about DB logs in this test, mock them or let them skip
             poller.resolver.resolve_player = MagicMock(return_value="123")
-            poller.get_player_history = MagicMock()
+            poller.get_player_history_async = AsyncMock()
             zinb_mock = MagicMock()
             zinb_mock.predict_over_probability.return_value = 0.52
             zinb_mock.mu = 15.5

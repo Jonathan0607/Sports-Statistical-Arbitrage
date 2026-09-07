@@ -1,0 +1,80 @@
+name: StatArb CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build Native Core & Run Test Suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: sports_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install System Dependencies & C++ Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ make libeigen3-dev libgomp1 postgresql-client
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pybind11 pytest pytest-asyncio
+          pip install -r requirements.txt
+
+      - name: Build C++ Bare-Metal Quant Core
+        run: |
+          chmod +x build_core.sh
+          ./build_core.sh
+
+      - name: Initialize Database Schema
+        env:
+          POSTGRES_URI: postgresql+psycopg2://postgres:password@localhost:5432/sports_db
+        run: |
+          python infrastructure/init_db.py
+          psql -h localhost -U postgres -d sports_db -f infrastructure/db_matchup_schema.sql
+          psql -h localhost -U postgres -d sports_db -f infrastructure/db_migration_v2.sql
+          psql -h localhost -U postgres -d sports_db -f infrastructure/db_migration_v3.sql
+
+      - name: Run Test Suite
+        env:
+          POSTGRES_URI: postgresql+psycopg2://postgres:password@localhost:5432/sports_db
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+        run: |
+          pytest tests/ -v

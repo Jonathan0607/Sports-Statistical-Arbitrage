@@ -1,0 +1,17 @@
+{
+  "target": "stl",
+  "stat_column": "steals",
+  "target_type": "residual",
+  "intercept": 0.001827303229499682,
+  "weights": [
+    0.21694702268082905,
+    0.6861518039456497
+  ],
+  "features": [
+    "xgb_residual",
+    "lgb_residual"
+  ],
+  "alpha": 0.08661916488147946,
+  "n_splits": 5,
+  "training_samples": 27926
+}

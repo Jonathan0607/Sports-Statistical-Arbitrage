@@ -82,7 +82,14 @@ CREATE TABLE IF NOT EXISTS odds_ticks (
     is_suspended BOOLEAN DEFAULT FALSE
 );
 
-SELECT create_hypertable('odds_ticks', 'timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable('odds_ticks', 'timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_odds_lookup ON odds_ticks (game_id, player_id, book_name, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_odds_player_market ON odds_ticks (player_id, market_type, timestamp DESC);
 

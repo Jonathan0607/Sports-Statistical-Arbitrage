@@ -12,7 +12,21 @@ services:
       - ./pgdata:/var/lib/postgresql/data
 
   redis:
-    image: redis:alpine
+    image: redis/redis-stack-server:latest
     restart: always
     ports:
       - "6379:6379"
+
+  statarb_engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      - db
+      - redis
+    environment:
+      - POSTGRES_URI=postgresql+psycopg2://postgres:password@db:5432/quant_engine
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+

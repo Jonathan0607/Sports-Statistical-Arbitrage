@@ -3,8 +3,13 @@
 -- TimescaleDB + PostgreSQL for NBA Player Prop Market Microstructure
 -- ============================================================================
 
--- Enable TimescaleDB extension
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+-- Enable TimescaleDB extension (if available)
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'TimescaleDB extension not available, proceeding with standard PostgreSQL tables.';
+END $$;
 
 -- ============================================================================
 -- 1. RELATIONAL METADATA TABLES (Standard PostgreSQL)
@@ -79,7 +84,14 @@ CREATE TABLE IF NOT EXISTS odds_ticks (
     is_suspended BOOLEAN DEFAULT FALSE         -- Flags if the book temporarily locks trading
 );
 
-SELECT create_hypertable('odds_ticks', 'timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable('odds_ticks', 'timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_odds_lookup ON odds_ticks (game_id, player_id, book_name, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_odds_player_market ON odds_ticks (player_id, market_type, timestamp DESC);
@@ -99,7 +111,14 @@ CREATE TABLE IF NOT EXISTS market_ticks (
     is_suspended BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-SELECT create_hypertable('market_ticks', 'timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable('market_ticks', 'timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_ticks_player_book ON market_ticks (player_id, bookmaker, timestamp DESC);
 
 -- ============================================================================
@@ -119,10 +138,18 @@ CREATE TABLE IF NOT EXISTS arb_signals (
     stale_under_odds INTEGER NOT NULL,
     expected_value NUMERIC(6, 4) NOT NULL,     -- e.g., 0.0345 (3.45% EV)
     z_score NUMERIC(5, 2),                     -- Divergence strength
-    kelly_fraction NUMERIC(5, 4) NOT NULL      -- Capital allocation recommendation
+    kelly_fraction NUMERIC(5, 4) NOT NULL,     -- Capital allocation recommendation
+    anchor_liquidity_usd NUMERIC(12, 2)        -- Exchange depth/liquidity at anchor price
 );
 
-SELECT create_hypertable('arb_signals', 'timestamp', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable('arb_signals', 'timestamp', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_signals_player ON arb_signals (player_id, timestamp DESC);
 
 -- Executed Trades (Audit trail and risk management performance tracking)

@@ -1,6 +1,6 @@
 import pytest
 import json
-from src.execution.sgp_worker import GlobalExposureTracker, SlipQueueManager
+from src.execution import GlobalExposureTracker, SlipQueueManager
 from infrastructure.entity_resolver import clean_player_name
 from infrastructure.redis_client import RedisClient
 
@@ -9,16 +9,16 @@ def redis_conn():
     return RedisClient().get_client()
 
 def test_clean_player_name():
-    assert clean_player_name("Luka Dončić") == "luka doncic"
-    assert clean_player_name("T.J. McConnell") == "tj mcconnell"
-    assert clean_player_name("Robert Williams III") == "robert williams"
-    assert clean_player_name("J.R. Smith Jr.") == "smith"
+    assert clean_player_name("Luka Dončić") == "lukadoncic"
+    assert clean_player_name("T.J. McConnell") == "tjmcconnell"
+    assert clean_player_name("Robert Williams III") == "robertwilliams"
+    assert clean_player_name("J.R. Smith Jr.") == "jrsmith"
 
 def test_exposure_tracker_keys():
     tracker = GlobalExposureTracker()
     date_str = tracker.get_current_date_est()
     key = tracker._get_key("Pascal Siakam", date_str)
-    assert key == f"exposure:player:pascal siakam:{date_str}"
+    assert key == f"exposure:player:pascalsiakam:{date_str}"
 
 def test_exposure_tracker_scaling(redis_conn):
     tracker = GlobalExposureTracker(max_exposure_per_player=500.00)

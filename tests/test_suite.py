@@ -18,17 +18,17 @@ def test_frontend_rendering():
 def test_integration_pipeline_design():
     """
     Step 2: Integration Pipeline Check.
-    Verifies that src/execution/sgp_worker.py contains the queue manager and enqueues slips to Redis.
+    Verifies that src/execution.py contains the queue manager and enqueues slips to Redis.
     """
-    worker_path = "src/execution/sgp_worker.py"
+    worker_path = "src/execution.py"
     assert os.path.exists(worker_path), f"File {worker_path} does not exist!"
     
     with open(worker_path, "r") as f:
         code = f.read()
         
     # Check queue manager class definition/usage
-    assert "SlipQueueManager" in code, "SlipQueueManager is not defined/used in sgp_worker.py"
-    assert "enqueue_slip" in code, "enqueue_slip is not utilized in sgp_worker.py"
+    assert "SlipQueueManager" in code, "SlipQueueManager is not defined/used in execution.py"
+    assert "enqueue_slip" in code, "enqueue_slip is not utilized in execution.py"
 
 
 def test_technical_documentation_completeness():

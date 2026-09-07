@@ -1,0 +1,17 @@
+{
+  "target": "reb",
+  "stat_column": "rebounds",
+  "target_type": "residual",
+  "intercept": -0.05177126036742734,
+  "weights": [
+    0.03020676680698921,
+    0.4174657348763305
+  ],
+  "features": [
+    "xgb_residual",
+    "lgb_residual"
+  ],
+  "alpha": 0.15760541520423485,
+  "n_splits": 5,
+  "training_samples": 27926
+}

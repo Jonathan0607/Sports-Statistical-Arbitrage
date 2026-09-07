@@ -1,0 +1,17 @@
+{
+  "target": "pts",
+  "stat_column": "points",
+  "target_type": "residual",
+  "intercept": 0.0343354685243996,
+  "weights": [
+    0.2925621147213964,
+    0.456898921694176
+  ],
+  "features": [
+    "xgb_residual",
+    "lgb_residual"
+  ],
+  "alpha": 0.32774731043956296,
+  "n_splits": 5,
+  "training_samples": 27926
+}
