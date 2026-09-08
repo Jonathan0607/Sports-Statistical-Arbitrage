@@ -47,10 +47,8 @@ CORES=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2)
 make -j"$CORES"
 
 echo "=== Copying compiled modules ==="
-# Copy compiled quant_core shared objects back to project root and src/
-cp quant_core*.so .. 2>/dev/null || true
+# Copy compiled quant_core shared objects to src/
 cp quant_core*.so ../src/ 2>/dev/null || true
-cp quant_core*.dylib .. 2>/dev/null || true
 cp quant_core*.dylib ../src/ 2>/dev/null || true
 
 echo "=== Native C++ core build successful ==="

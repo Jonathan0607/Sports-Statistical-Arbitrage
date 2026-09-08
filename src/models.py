@@ -16,9 +16,12 @@ import os
 import sys
 import lifelines
 try:
-    import quant_core
+    from src import quant_core
 except ImportError:
-    quant_core = None
+    try:
+        import quant_core
+    except ImportError:
+        quant_core = None
 import math
 import sqlite3
 import matplotlib

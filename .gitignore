@@ -1,14 +1,25 @@
-# Environments
+# Environment & Secrets
 venv/
 .env
 
-# Cache and Logs
+# Python Caches
 __pycache__/
-*.pyc
-logs/
-*.log
+*.py[cod]
+*$py.class
+.pytest_cache/
 
-# OS generated files
+# C++ Build Artifacts
+build/
+*.so
+*.dylib
+
+# Local Infrastructure & Data
+pgdata/
+logs/*
+!logs/.gitkeep
+
+# Model Artifacts (Ignore expanding walk-forward folds, track only global baselines)
+models/wf_fold*/*
+
+# OS Files
 .DS_Store
-
-tests/*
