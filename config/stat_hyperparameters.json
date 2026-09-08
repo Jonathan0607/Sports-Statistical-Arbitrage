@@ -1,0 +1,86 @@
+{
+  "reb": {
+    "target": "reb",
+    "stat_column": "rebounds",
+    "best_cv_mae": 2.000911124060523,
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 2,
+      "learning_rate": 0.03654976408370011,
+      "colsample_bytree": 0.4095892385474593,
+      "subsample": 0.8312849643173548,
+      "reg_lambda": 70.05192912731646,
+      "reg_alpha": 17.878166511027633,
+      "objective": "reg:absoluteerror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 2,
+      "learning_rate": 0.03654976408370011,
+      "colsample_bytree": 0.4095892385474593,
+      "subsample": 0.8312849643173548,
+      "reg_lambda": 70.05192912731646,
+      "reg_alpha": 17.878166511027633,
+      "objective": "regression_l1",
+      "random_state": 42,
+      "verbose": -1
+    }
+  },
+  "ast": {
+    "target": "ast",
+    "stat_column": "assists",
+    "best_cv_mae": 1.3680294758141676,
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.04942682507621884,
+      "colsample_bytree": 0.6910603953159058,
+      "subsample": 0.5903184398659289,
+      "reg_lambda": 36.338254436898666,
+      "reg_alpha": 6.086500759710058,
+      "objective": "reg:absoluteerror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.04942682507621884,
+      "colsample_bytree": 0.6910603953159058,
+      "subsample": 0.5903184398659289,
+      "reg_lambda": 36.338254436898666,
+      "reg_alpha": 6.086500759710058,
+      "objective": "regression_l1",
+      "random_state": 42,
+      "verbose": -1
+    }
+  },
+  "pts": {
+    "target": "pts",
+    "stat_column": "points",
+    "best_cv_mae": 4.680922183679651,
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.047761268976671836,
+      "colsample_bytree": 0.78694121704626,
+      "subsample": 0.6013958564759251,
+      "reg_lambda": 92.02805202601854,
+      "reg_alpha": 50.05877614951303,
+      "objective": "reg:absoluteerror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.047761268976671836,
+      "colsample_bytree": 0.78694121704626,
+      "subsample": 0.6013958564759251,
+      "reg_lambda": 92.02805202601854,
+      "reg_alpha": 50.05877614951303,
+      "objective": "regression_l1",
+      "random_state": 42,
+      "verbose": -1
+    }
+  }
+}

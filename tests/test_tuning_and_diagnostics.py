@@ -63,7 +63,7 @@ def test_optuna_tuning_execution():
 
 
 def test_residual_diagnostics_generation(tmp_path):
-    """Verify that run_backtest creates diagnostic_residuals.png and computes month stability."""
+    """Verify that run_backtest creates diagnostic_residuals.png and computes metrics."""
     replay = HistoricalReplayCore()
 
     mock_logs = pd.DataFrame([
@@ -79,8 +79,10 @@ def test_residual_diagnostics_generation(tmp_path):
             "stat_category": "Points",
             "game_time": game_time,
             "actual_value": actual_outcome_value,
+            "meta_prediction": actual_outcome_value + 1.2,
             "xgboost_prediction": actual_outcome_value + 1.2,
-            "naive_prediction": actual_outcome_value + 2.5,
+            "ewma_baseline": actual_outcome_value + 2.5,
+            "crps": 0.95,
         }
 
     with patch.object(replay.engine, "connect"), \
@@ -95,3 +97,82 @@ def test_residual_diagnostics_generation(tmp_path):
 
         assert len(results) == 3
         assert os.path.exists("logs/diagnostic_residuals.png")
+
+
+def test_stat_specific_regularization_search_space():
+    """Verify that reb and ast use aggressive regularization search spaces compared to pts."""
+    from src.tune_models import get_stat_specific_search_space
+    import optuna
+
+    study_reb = optuna.create_study()
+    trial_reb = study_reb.ask()
+    params_reb = get_stat_specific_search_space("reb", trial_reb)
+
+    # Rebounds should have restricted max_depth in [1, 3] and elevated penalties
+    assert 1 <= params_reb["max_depth"] <= 3
+    assert 5.0 <= params_reb["reg_alpha"] <= 100.0
+    assert 10.0 <= params_reb["reg_lambda"] <= 200.0
+    assert 0.005 <= params_reb["learning_rate"] <= 0.05
+
+    study_pts = optuna.create_study()
+    trial_pts = study_pts.ask()
+    params_pts = get_stat_specific_search_space("pts", trial_pts)
+
+    assert 1 <= params_pts["max_depth"] <= 3
+    assert 5.0 <= params_pts["reg_alpha"] <= 100.0
+    assert 15.0 <= params_pts["reg_lambda"] <= 250.0
+
+    study_gen = optuna.create_study()
+    trial_gen = study_gen.ask()
+    params_gen = get_stat_specific_search_space("generic", trial_gen)
+
+    assert 3 <= params_gen["max_depth"] <= 6
+    assert 0.1 <= params_gen["reg_alpha"] <= 5.0
+    assert 0.5 <= params_gen["reg_lambda"] <= 10.0
+
+
+def test_load_feature_matrix_train_seasons_filter():
+    """Verify load_feature_matrix_for_tuning applies train_seasons filter."""
+    mock_conn = MagicMock()
+    mock_conn.execute.return_value.fetchall.return_value = [("p1",)]
+    
+    mock_df = pd.DataFrame({
+        "game_id": [1, 2, 3, 4, 5, 6, 7],
+        "season": ["2023-24", "2023-24", "2023-24", "2023-24", "2023-24", "2024-25", "2024-25"],
+        "start_time": pd.date_range("2023-10-01", periods=7, freq="D"),
+        "minutes_played": [30.0]*7,
+        "points": [20.0]*7,
+        "rebounds": [5.0]*7,
+        "assists": [5.0]*7,
+        "turnovers": [2.0]*7,
+        "potential_assists": [6.0]*7,
+        "touches": [40.0]*7,
+        "avg_defender_distance_ft": [4.0]*7,
+        "days_rest": [1.0]*7,
+        "is_back_to_back": [0.0]*7,
+        "opp_def_rating": [110.0]*7,
+        "opp_pace_factor": [100.0]*7,
+        "opp_pos_pts_allowed": [22.0]*7,
+        "vacated_usage": [0.0]*7,
+        "passes_made": [25.0]*7,
+        "time_of_possession_sec": [100.0]*7,
+        "is_home_game": [1.0]*7,
+        "pace_differential": [0.0]*7,
+    })
+
+    with patch("src.tune_models.sqlalchemy.create_engine") as mock_engine, \
+         patch("src.tune_models.ContextualFeatureEngine") as mock_fe_class:
+         
+        mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
+        
+        mock_fe = MagicMock()
+        mock_fe.build_player_feature_matrix.return_value = mock_df
+        mock_fe_class.return_value = mock_fe
+        
+        X, y_residual, roll_stat, y_actual = load_feature_matrix_for_tuning(
+            target_key="pts", return_full=True, train_seasons=["2023-24"]
+        )
+        
+        # 5 rows for 2023-24. 1 row lost to shift(1). ewma. Should be 4 rows.
+        assert len(X) == 4
+

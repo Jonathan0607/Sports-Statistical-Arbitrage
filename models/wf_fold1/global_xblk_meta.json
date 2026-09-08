@@ -1,0 +1,17 @@
+{
+  "target": "blk",
+  "stat_column": "blocks",
+  "target_type": "residual",
+  "intercept": 0.23147261117517332,
+  "weights": [
+    -0.009557334656870095,
+    1.0188311038141349
+  ],
+  "features": [
+    "xgb_residual",
+    "lgb_residual"
+  ],
+  "alpha": 0.3250759851718773,
+  "n_splits": 5,
+  "training_samples": 83909
+}

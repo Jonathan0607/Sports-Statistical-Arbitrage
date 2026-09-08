@@ -2,16 +2,16 @@
   "target": "reb",
   "stat_column": "rebounds",
   "target_type": "residual",
-  "intercept": -0.05177126036742734,
+  "intercept": 0.22534907907838267,
   "weights": [
-    0.03020676680698921,
-    0.4174657348763305
+    0.15880520745330456,
+    0.6980767139191529
   ],
   "features": [
     "xgb_residual",
     "lgb_residual"
   ],
-  "alpha": 0.15760541520423485,
+  "alpha": 0.12883618437212974,
   "n_splits": 5,
-  "training_samples": 27926
+  "training_samples": 83909
 }

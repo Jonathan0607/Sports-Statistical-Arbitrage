@@ -52,23 +52,26 @@ if DB_URI.startswith("postgres://"):
 engine = sqlalchemy.create_engine(DB_URI)
 
 
-def get_season_game_ids(season: str = "2025-26") -> list:
+def get_season_game_ids(seasons: list = None) -> list:
     """
-    Fetches all unique game IDs from the games table for a given season.
-    Uses start_time filtering (Oct 2025 through Jun 2026).
+    Fetches all unique game IDs from the games table for requested seasons.
     """
+    if seasons is None:
+        seasons = ["2023-24", "2024-25", "2025-26"]
+    elif isinstance(seasons, str):
+        seasons = [seasons]
+
     query = """
         SELECT DISTINCT game_id
         FROM games
-        WHERE start_time >= '2025-10-01'
-          AND start_time < '2026-07-01'
+        WHERE season IN :seasons
         ORDER BY game_id ASC;
     """
     try:
         with engine.connect() as conn:
-            result = conn.execute(sqlalchemy.text(query)).fetchall()
+            result = conn.execute(sqlalchemy.text(query), {"seasons": tuple(seasons)}).fetchall()
         game_ids = [int(row[0]) for row in result]
-        logger.info(f"Found {len(game_ids)} games for season {season}.")
+        logger.info(f"Found {len(game_ids)} games for seasons {seasons}.")
         return game_ids
     except Exception as e:
         logger.error(f"Failed to fetch game IDs: {e}")
@@ -271,13 +274,18 @@ def backfill_tracking_fallback():
         logger.error(f"Error in tracking fallback: {e}")
 
 
-def backfill_tracking(season: str = "2025-26", max_games: int = None, max_workers: int = 4):
-    """Main orchestrator: fetches tracking data for season games and upserts."""
+def backfill_tracking(seasons: list = None, max_games: int = None, max_workers: int = 4):
+    """Main orchestrator: fetches tracking data for games across seasons and upserts."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    logger.info(f"Starting tracking data backfill for season {season}...")
+    if seasons is None:
+        seasons = ["2023-24", "2024-25", "2025-26"]
+    elif isinstance(seasons, str):
+        seasons = [seasons]
 
-    game_ids = get_season_game_ids(season)
+    logger.info(f"Starting tracking data backfill for seasons {seasons}...")
+
+    game_ids = get_season_game_ids(seasons)
     if not game_ids:
         logger.error("No game IDs found. Aborting.")
         return
@@ -302,20 +310,20 @@ def backfill_tracking(season: str = "2025-26", max_games: int = None, max_worker
             logger.error(f"Error processing tracking for game {gid}: {err}")
             return 0
 
-    logger.info(f"Dispatching tracking backfill across {total_games} games with {max_workers} workers...")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_process_single_game, gid): gid for gid in game_ids}
-        for future in as_completed(futures):
-            count = future.result()
-            total_upserted += count
-            completed_games += 1
-            if completed_games % 50 == 0 or completed_games == total_games:
-                logger.info(f"Progress: {completed_games}/{total_games} games processed ({total_upserted} tracking rows upserted).")
+    if total_games > 0 and max_games is not None and max_games > 0:
+        logger.info(f"Dispatching tracking backfill across {total_games} games with {max_workers} workers...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process_single_game, gid): gid for gid in game_ids}
+            for future in as_completed(futures):
+                count = future.result()
+                total_upserted += count
+                completed_games += 1
+                if completed_games % 50 == 0 or completed_games == total_games:
+                    logger.info(f"Progress: {completed_games}/{total_games} games processed ({total_upserted} tracking rows upserted).")
 
-    # Complete full coverage
+    # Complete full coverage across all player game logs
     backfill_tracking_fallback()
-    logger.info(f"Backfill complete. Total API games: {completed_games}, Total API rows upserted: {total_upserted}")
+    logger.info(f"Backfill complete. Total API games processed: {completed_games}, Total API rows upserted: {total_upserted}")
 
 
 if __name__ == "__main__":

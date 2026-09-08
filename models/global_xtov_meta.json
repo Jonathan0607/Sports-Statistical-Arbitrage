@@ -2,16 +2,16 @@
   "target": "tov",
   "stat_column": "turnovers",
   "target_type": "residual",
-  "intercept": -0.023266015724051133,
+  "intercept": 0.2616860927204867,
   "weights": [
-    0.47478357136215055,
-    0.4169132747369644
+    0.13831802401964544,
+    0.8716488488269252
   ],
   "features": [
     "xgb_residual",
     "lgb_residual"
   ],
-  "alpha": 0.03743443673943657,
+  "alpha": 0.048683296905585705,
   "n_splits": 5,
-  "training_samples": 27926
+  "training_samples": 83909
 }

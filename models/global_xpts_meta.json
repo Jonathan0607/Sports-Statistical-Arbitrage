@@ -2,16 +2,16 @@
   "target": "pts",
   "stat_column": "points",
   "target_type": "residual",
-  "intercept": 0.0343354685243996,
+  "intercept": 0.6003693306193133,
   "weights": [
-    0.2925621147213964,
-    0.456898921694176
+    0.1336630573569122,
+    0.7678293727920287
   ],
   "features": [
     "xgb_residual",
     "lgb_residual"
   ],
-  "alpha": 0.32774731043956296,
+  "alpha": 0.3486640177820575,
   "n_splits": 5,
-  "training_samples": 27926
+  "training_samples": 83909
 }

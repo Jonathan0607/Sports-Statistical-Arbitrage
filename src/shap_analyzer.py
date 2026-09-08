@@ -30,16 +30,31 @@ class ShapAnalyzer:
         logger.info("Initializing SHAP TreeExplainer...")
         self.explainer = shap.TreeExplainer(self.model)
 
-    def analyze_prediction(self, feature_vector: np.ndarray, feature_names: list) -> dict:
+    def analyze_prediction(self, feature_vector: np.ndarray, feature_names: list = None) -> dict:
         """
         Calculates the SHAP values (local contribution) for a specific feature vector.
         """
-        # Reshape input to 2D row array if 1D is passed
-        if len(feature_vector.shape) == 1:
-            feature_vector = feature_vector.reshape(1, -1)
+        if isinstance(feature_vector, pd.DataFrame):
+            df = feature_vector.copy()
+            if feature_names is None:
+                feature_names = list(df.columns)
+        else:
+            # Reshape input to 2D row array if 1D is passed
+            if len(feature_vector.shape) == 1:
+                feature_vector = feature_vector.reshape(1, -1)
+            
+            if feature_names is not None:
+                df = pd.DataFrame(feature_vector, columns=feature_names)
+            else:
+                df = pd.DataFrame(feature_vector)
+                feature_names = list(df.columns)
+
+        for cat_col in ['player_id', 'team_id', 'opponent_team_id']:
+            if cat_col in df.columns:
+                df[cat_col] = df[cat_col].fillna(0).astype(int).astype(str).astype('category')
 
         # Compute SHAP values
-        shap_values_obj = self.explainer(feature_vector)
+        shap_values_obj = self.explainer(df)
         
         # shap_values_obj.values contains the contributions. For a single row, index it.
         row_shap = shap_values_obj.values[0]
@@ -47,7 +62,7 @@ class ShapAnalyzer:
 
         contributions = {}
         for idx, name in enumerate(feature_names):
-            contributions[name] = float(row_shap[idx])
+            contributions[str(name)] = float(row_shap[idx])
 
         return {
             "base_value": base_val,
@@ -64,11 +79,16 @@ class ShapAnalyzer:
         # Ensure output directory exists
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
+        df = historical_feature_matrix.copy()
+        for cat_col in ['player_id', 'team_id', 'opponent_team_id']:
+            if cat_col in df.columns:
+                df[cat_col] = df[cat_col].fillna(0).astype(int).astype(str).astype('category')
+
         # Compute SHAP values across matrix
-        shap_values = self.explainer(historical_feature_matrix)
+        shap_values = self.explainer(df)
         
         plt.figure(figsize=(10, 6))
-        shap.summary_plot(shap_values, historical_feature_matrix, show=False)
+        shap.summary_plot(shap_values, df, show=False)
         plt.tight_layout()
         plt.savefig(output_path)
         plt.close()
@@ -76,33 +96,22 @@ class ShapAnalyzer:
 
 
 if __name__ == "__main__":
+    from src.train_global_model import FEATURE_COLUMNS
     # Define Points model path
     points_model_path = "models/global_xpts.json"
+    if not os.path.exists(points_model_path):
+        points_model_path = "models/global_xpts_xgb.json"
     
-    # Mock features vector representing:
-    # [minutes_played_mean, pred_bayesian_stat, usage_rate_mean, days_rest, is_back_to_back,
-    #  opp_def_rating, opp_pace_factor, opp_pos_pts_allowed, vacated_usage,
-    #  roll_potential_assists, roll_touches, roll_defender_distance]
-    mock_vector = np.array([30.5, 18.2, 0.225, 2.0, 0.0, 112.5, 100.5, 107.0, 0.28, 3.5, 55.0, 4.2])
-    
-    feature_columns = [
-        "minutes_played_mean",
-        "pred_bayesian_stat",
-        "usage_rate_mean",
-        "days_rest",
-        "is_back_to_back",
-        "opp_def_rating",
-        "opp_pace_factor",
-        "opp_pos_pts_allowed",
-        "vacated_usage",
-        "roll_potential_assists",
-        "roll_touches",
-        "roll_defender_distance",
+    mock_row = [
+        30.5, 20.0, 0.25, 2.0, 0.0, 112.5, 100.5, 107.0, 0.28,
+        3.5, 55.0, 42.0, 4.5, 4.2, 1.0, 2.0, 4.0, 0.5,
+        0.58, 12.0, 25.0, 1.0, 5.0, 1.1,
+        201939.0, 1610612744.0, 1610612747.0
     ]
     
     try:
         analyzer = ShapAnalyzer(points_model_path)
-        analysis = analyzer.analyze_prediction(mock_vector, feature_columns)
+        analysis = analyzer.analyze_prediction(np.array(mock_row), FEATURE_COLUMNS)
         
         print("\n" + "=" * 60)
         print("🔍 XGBOOST POINTS MODEL - LOCAL SHAP EXPLANATION 🔍")
@@ -118,3 +127,4 @@ if __name__ == "__main__":
         
     except Exception as e:
         print(f"Failed to run SHAP analyzer demo: {e}", file=sys.stderr)
+

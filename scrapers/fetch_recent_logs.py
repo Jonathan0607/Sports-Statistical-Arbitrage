@@ -3,6 +3,7 @@ import os
 import sys
 import logging
 import pandas as pd
+import numpy as np
 import sqlalchemy
 from dotenv import load_dotenv
 
@@ -54,34 +55,33 @@ def extract_minutes(min_str) -> float:
     except Exception:
         return 0.0
 
-def backfill_season_type(season_type: str):
-    """Fetches full box score logs from API and commits non-existent data to Postgres."""
-    logger.info(f"Querying stats.nba.com for 2025-26 {season_type} dataset...")
+def backfill_season_logs(season: str, season_type: str):
+    """Fetches full box score logs from API for a specific season and upserts to Postgres."""
+    logger.info(f"Querying stats.nba.com for {season} {season_type} dataset...")
     
     try:
         raw_log = leaguegamelog.LeagueGameLog(
-            season='2025-26',
+            season=season,
             player_or_team_abbreviation='P',
             season_type_all_star=season_type
         )
         df = raw_log.get_data_frames()[0]
     except Exception as e:
-        logger.error(f"Failed pulling data from NBA API endpoint: {e}")
+        logger.error(f"Failed pulling data from NBA API endpoint for {season} {season_type}: {e}")
         return
 
     if df.empty:
-        logger.warning(f"No records returned for season type: {season_type}")
+        logger.warning(f"No records returned for {season} {season_type}")
         return
 
-    logger.info(f"Ingesting {len(df)} prospective logs. Processing unique roster mapping allocations...")
+    logger.info(f"Ingesting {len(df)} prospective logs for {season} {season_type}...")
     
     with engine.begin() as conn:
         # Step 1: Ensure missing entities are registered in 'players' table
         unique_players = df[['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ABBREVIATION']].drop_duplicates()
         for _, row in unique_players.iterrows():
-            pid, pname, team = str(row['PLAYER_ID']), row['PLAYER_NAME'], row['TEAM_ABBREVIATION']
+            pid, pname, team = str(row['PLAYER_ID']), str(row['PLAYER_NAME']), str(row['TEAM_ABBREVIATION'])
             
-            # Insert/update canonical player
             conn.execute(
                 sqlalchemy.text("""
                     INSERT INTO players (master_player_id, full_name, team_abbrev, position)
@@ -92,7 +92,6 @@ def backfill_season_type(season_type: str):
                 {"pid": pid, "name": pname, "team": team}
             )
             
-            # Insert mappings for various books (normalized names handled by resolver fallback, but explicit mappings help)
             for book in ['DraftKings', 'PrizePicks', 'Pinnacle']:
                 conn.execute(
                     sqlalchemy.text("""
@@ -102,8 +101,6 @@ def backfill_season_type(season_type: str):
                     """),
                     {"book": book, "remote_name": pname, "pid": pid}
                 )
-                
-                # Also seed lowercased version as explicit mapping
                 conn.execute(
                     sqlalchemy.text("""
                         INSERT INTO player_mappings (book_name, remote_player_name, master_player_id)
@@ -113,45 +110,89 @@ def backfill_season_type(season_type: str):
                     {"book": book, "remote_name": pname.lower(), "pid": pid}
                 )
 
-        # Step 2: Batch process and insert clean performance records using explicit anti-duplication queries
-        success_count = 0
+        # Step 2: Batch upsert player_game_logs with ON CONFLICT (game_id, player_id)
+        records = []
         for _, log in df.iterrows():
-            game_id = int(log['GAME_ID'])  # cast to integer format
+            game_id = int(log['GAME_ID'])
             player_id = str(log['PLAYER_ID'])
             mp = extract_minutes(log['MIN'])
-            
-            # Formulating the explicit NOT EXISTS parameterization boundary
-            stmt = sqlalchemy.text("""
-                INSERT INTO player_game_logs (game_id, player_id, minutes_played, points, rebounds, assists, turnovers, steals, blocks, three_pointers_made)
-                SELECT :game_id, :player_id, :mp, :pts, :reb, :ast, :tov, :stl, :blk, :fg3m
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM player_game_logs 
-                    WHERE game_id = :game_id AND player_id = :player_id
-                );
-            """)
-            
-            res = conn.execute(stmt, {
+            pts = int(log['PTS']) if not pd.isna(log['PTS']) else 0
+            reb = int(log['REB']) if not pd.isna(log['REB']) else 0
+            ast = int(log['AST']) if not pd.isna(log['AST']) else 0
+            tov = int(log['TOV']) if not pd.isna(log['TOV']) else 0
+            stl = int(log['STL']) if not pd.isna(log['STL']) else 0
+            blk = int(log['BLK']) if not pd.isna(log['BLK']) else 0
+            fgm = int(log['FGM']) if not pd.isna(log['FGM']) else 0
+            fga = int(log['FGA']) if not pd.isna(log['FGA']) else 0
+            fg3m = int(log['FG3M']) if not pd.isna(log['FG3M']) else 0
+            ftm = int(log['FTM']) if not pd.isna(log['FTM']) else 0
+            fta = int(log['FTA']) if not pd.isna(log['FTA']) else 0
+            pm = int(log['PLUS_MINUS']) if not pd.isna(log['PLUS_MINUS']) else 0
+
+            # Compute usage_rate
+            usg = float(np.clip((pts + 1.5 * ast + tov) / (mp * 2.0 + 1e-5), 0.05, 0.45)) if mp > 0 else 0.05
+
+            records.append({
                 "game_id": game_id,
                 "player_id": player_id,
                 "mp": mp,
-                "pts": int(log['PTS']) if not pd.isna(log['PTS']) else 0,
-                "reb": int(log['REB']) if not pd.isna(log['REB']) else 0,
-                "ast": int(log['AST']) if not pd.isna(log['AST']) else 0,
-                "tov": int(log['TOV']) if not pd.isna(log['TOV']) else 0,
-                "stl": int(log['STL']) if not pd.isna(log['STL']) else 0,
-                "blk": int(log['BLK']) if not pd.isna(log['BLK']) else 0,
-                "fg3m": int(log['FG3M']) if not pd.isna(log['FG3M']) else 0
+                "pts": pts,
+                "reb": reb,
+                "ast": ast,
+                "tov": tov,
+                "stl": stl,
+                "blk": blk,
+                "fgm": fgm,
+                "fga": fga,
+                "fg3m": fg3m,
+                "ftm": ftm,
+                "fta": fta,
+                "pm": pm,
+                "usg": usg
             })
-            if res.rowcount > 0:
-                success_count += 1
-                
-        logger.info(f"Committed {success_count} unique new game logs into player_game_logs.")
 
-def main():
-    # Execute full backfill sweep across regular season and playoffs
-    backfill_season_type('Regular Season')
-    backfill_season_type('Playoffs')
-    logger.info("Database ingestion sync execution complete.")
+        upsert_stmt = sqlalchemy.text("""
+            INSERT INTO player_game_logs (
+                game_id, player_id, minutes_played, points, rebounds, assists,
+                turnovers, steals, blocks, field_goals_made, field_goals_attempted,
+                three_pointers_made, free_throws_made, free_throws_attempted, plus_minus, usage_rate
+            ) VALUES (
+                :game_id, :player_id, :mp, :pts, :reb, :ast,
+                :tov, :stl, :blk, :fgm, :fga,
+                :fg3m, :ftm, :fta, :pm, :usg
+            )
+            ON CONFLICT (game_id, player_id) DO UPDATE SET
+                minutes_played = EXCLUDED.minutes_played,
+                points = EXCLUDED.points,
+                rebounds = EXCLUDED.rebounds,
+                assists = EXCLUDED.assists,
+                turnovers = EXCLUDED.turnovers,
+                steals = EXCLUDED.steals,
+                blocks = EXCLUDED.blocks,
+                field_goals_made = EXCLUDED.field_goals_made,
+                field_goals_attempted = EXCLUDED.field_goals_attempted,
+                three_pointers_made = EXCLUDED.three_pointers_made,
+                free_throws_made = EXCLUDED.free_throws_made,
+                free_throws_attempted = EXCLUDED.free_throws_attempted,
+                plus_minus = EXCLUDED.plus_minus,
+                usage_rate = EXCLUDED.usage_rate;
+        """)
+
+        batch_size = 2000
+        for i in range(0, len(records), batch_size):
+            conn.execute(upsert_stmt, records[i:i+batch_size])
+
+        logger.info(f"Successfully upserted {len(records)} game logs for {season} {season_type}.")
+
+def backfill_all_seasons(seasons: list = None):
+    """Executes full backfill sweep across requested seasons for Regular Season and Playoffs."""
+    if seasons is None:
+        seasons = ['2023-24', '2024-25', '2025-26']
+
+    for season in seasons:
+        backfill_season_logs(season, 'Regular Season')
+        backfill_season_logs(season, 'Playoffs')
+    logger.info("Multi-season player game logs ingestion sync complete.")
 
 if __name__ == "__main__":
-    main()
+    backfill_all_seasons()

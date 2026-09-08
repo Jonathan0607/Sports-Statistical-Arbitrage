@@ -113,14 +113,18 @@ class ContextualFeatureEngine:
         If it doesn't, we will fetch the complete history from DB.
         """
         if 'game_id' not in history_df.columns or 'start_time' not in history_df.columns:
-            # Fetch complete history with game dates
+            # Fetch complete history with game dates and season tag
             query = """
-                SELECT g.game_id, gm.start_time, gm.home_team_id, gm.away_team_id,
+                SELECT g.game_id, gm.start_time, gm.season, gm.home_team_id, gm.away_team_id,
                        g.minutes_played, g.points, g.rebounds, g.assists, g.turnovers,
                        g.steals, g.blocks, g.three_pointers_made, g.usage_rate,
+                       g.field_goals_attempted, g.free_throws_attempted, g.plus_minus,
                        COALESCE(t.potential_assists, 0.0) AS potential_assists,
                        COALESCE(t.touches, 0.0) AS touches,
-                       COALESCE(t.avg_defender_distance_ft, 4.5) AS avg_defender_distance_ft
+                       COALESCE(t.passes_made, 0.0) AS passes_made,
+                       COALESCE(t.time_of_possession_sec, 0.0) AS time_of_possession_sec,
+                       COALESCE(t.avg_defender_distance_ft, 4.5) AS avg_defender_distance_ft,
+                       COALESCE(t.shorthanded_points, 0.0) AS shorthanded_points
                 FROM player_game_logs g
                 JOIN games gm ON g.game_id = gm.game_id
                 LEFT JOIN player_tracking_logs t ON g.game_id = t.game_id AND g.player_id = t.player_id
@@ -142,7 +146,11 @@ class ContextualFeatureEngine:
                     df['vacated_usage'] = 0.0
                     df['roll_potential_assists'] = 0.0
                     df['roll_touches'] = 0.0
+                    df['roll_passes_made'] = 0.0
+                    df['roll_time_of_possession_sec'] = 0.0
                     df['roll_defender_distance'] = 4.5
+                    df['is_home_game'] = 0.0
+                    df['pace_differential'] = 0.0
                     return df
                 history_df = df
             except Exception as e:
@@ -157,7 +165,11 @@ class ContextualFeatureEngine:
                 df['vacated_usage'] = 0.0
                 df['roll_potential_assists'] = 0.0
                 df['roll_touches'] = 0.0
+                df['roll_passes_made'] = 0.0
+                df['roll_time_of_possession_sec'] = 0.0
                 df['roll_defender_distance'] = 4.5
+                df['is_home_game'] = 0.0
+                df['pace_differential'] = 0.0
                 return df
         else:
             if target_date:
@@ -167,21 +179,38 @@ class ContextualFeatureEngine:
         df['start_time'] = pd.to_datetime(df['start_time'], utc=True)
         df = df.sort_values('start_time').reset_index(drop=True)
 
+        if 'season' not in df.columns:
+            def infer_season(dt):
+                if pd.isna(dt):
+                    return '2025-26'
+                y, m = dt.year, dt.month
+                return f"{y}-{str(y+1)[-2:]}" if m >= 9 else f"{y-1}-{str(y)[-2:]}"
+            df['season'] = df['start_time'].apply(infer_season)
+
         team_id, position = self.get_player_team_and_pos(player_id)
         if not team_id:
-            if not df.empty:
+            if not df.empty and 'home_team_id' in df.columns:
                 team_id = int(df.iloc[0]['home_team_id'])
             else:
                 team_id = 0
+                
+        df['team_id'] = team_id
+        df['player_id'] = player_id
 
-        # 1. Rest & Back-to-Back features
+        # 1. Rest & Back-to-Back features (reset at season boundaries to prevent summer bleedover)
+        if 'home_team_id' in df.columns:
+            df['is_home_game'] = (df['home_team_id'].astype(float) == float(team_id)).astype(float)
+        else:
+            df['is_home_game'] = 0.0
+
         days_rest_list = []
         is_b2b_list = []
         for i in range(len(df)):
-            if i == 0:
+            if i == 0 or (df.loc[i, 'season'] != df.loc[i-1, 'season']):
                 days_rest = 3.0
             else:
-                days_rest = (df.loc[i, 'start_time'] - df.loc[i-1, 'start_time']).days
+                raw_days = (df.loc[i, 'start_time'] - df.loc[i-1, 'start_time']).days
+                days_rest = float(raw_days)
             days_rest_list.append(float(days_rest))
             is_b2b_list.append(1.0 if days_rest == 1 else 0.0)
 
@@ -225,12 +254,15 @@ class ContextualFeatureEngine:
         opp_def_rating_list = []
         opp_pace_factor_list = []
         opp_pos_pts_allowed_list = []
+        pace_differential_list = []
         fallback_pos_allowed = {"PG": 24.0, "SG": 22.0, "SF": 21.0, "PF": 22.0, "C": 23.0}
 
         for _, row in df.iterrows():
             opp_id = int(row['opponent_team_id'])
             g_id = int(row['game_id'])
             metrics = opp_metrics.get((opp_id, g_id))
+            own_metrics = opp_metrics.get((team_id, g_id))
+            
             if metrics:
                 opp_def_rating_list.append(metrics["opp_def_rating"])
                 opp_pace_factor_list.append(metrics["opp_pace_factor"])
@@ -239,10 +271,16 @@ class ContextualFeatureEngine:
                 opp_def_rating_list.append(115.0)
                 opp_pace_factor_list.append(99.0)
                 opp_pos_pts_allowed_list.append(fallback_pos_allowed.get(position.upper(), 22.0))
+            
+            if own_metrics and metrics:
+                pace_differential_list.append(own_metrics["opp_pace_factor"] - metrics["opp_pace_factor"])
+            else:
+                pace_differential_list.append(0.0)
 
         df['opp_def_rating'] = opp_def_rating_list
         df['opp_pace_factor'] = opp_pace_factor_list
         df['opp_pos_pts_allowed'] = opp_pos_pts_allowed_list
+        df['pace_differential'] = pace_differential_list
 
         # 3. Vacated usage feature (Bulk query)
         co_stars = self.get_co_stars(team_id, exclude_player_id=player_id)
@@ -299,16 +337,31 @@ class ContextualFeatureEngine:
 
         df['vacated_usage'] = vacated_usage_list
 
-        # 4. Rolling tracking features (from player_tracking_logs)
-        for col, default in [('potential_assists', 0.0), ('touches', 0.0), ('avg_defender_distance_ft', 4.5)]:
+        # 4. Rolling tracking features (from player_tracking_logs) - partitioned strictly by season
+        for col, default in [('potential_assists', 0.0), ('touches', 0.0), ('passes_made', 0.0), ('time_of_possession_sec', 0.0), ('avg_defender_distance_ft', 4.5), ('shorthanded_points', 0.0), ('plus_minus', 0.0), ('field_goals_attempted', 0.0), ('free_throws_attempted', 0.0)]:
             if col not in df.columns:
                 df[col] = default
             else:
                 df[col] = df[col].fillna(default)
 
-        df['roll_potential_assists'] = df['potential_assists'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-        df['roll_touches'] = df['touches'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-        df['roll_defender_distance'] = df['avg_defender_distance_ft'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(4.5)
+        # Advanced derived columns before rolling
+        df['ts_pct'] = df['points'] / (2 * (df['field_goals_attempted'] + 0.44 * df['free_throws_attempted']) + 1e-5)
+        df['reb_rate'] = (df['rebounds'] / (df['minutes_played'] + 1e-5)) * 36.0
+        df['ast_rate'] = (df['assists'] / (df['minutes_played'] + 1e-5)) * 36.0
+        df['usg_efficiency'] = df['points'] / ((df['usage_rate'] * df['minutes_played']) + 1e-5)
+
+        df['roll_potential_assists'] = df.groupby('season')['potential_assists'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_touches'] = df.groupby('season')['touches'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_passes_made'] = df.groupby('season')['passes_made'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_time_of_possession_sec'] = df.groupby('season')['time_of_possession_sec'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_defender_distance'] = df.groupby('season')['avg_defender_distance_ft'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(4.5)
+        df['roll_shorthanded_points'] = df.groupby('season')['shorthanded_points'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_plus_minus'] = df.groupby('season')['plus_minus'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        
+        df['roll_ts_pct'] = df.groupby('season')['ts_pct'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_reb_rate'] = df.groupby('season')['reb_rate'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_ast_rate'] = df.groupby('season')['ast_rate'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
+        df['roll_usg_efficiency'] = df.groupby('season')['usg_efficiency'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
 
         return df
 
@@ -324,12 +377,14 @@ class ContextualFeatureEngine:
                 "opp_def_rating": 115.0,
                 "opp_pace_factor": 99.0,
                 "opp_pos_pts_allowed": 22.0,
-                "vacated_usage": 0.0
+                "vacated_usage": 0.0,
+                "is_home_game": 0.0,
+                "pace_differential": 0.0
             }
 
         # Query upcoming game
         query_game = """
-            SELECT game_id, home_team_id, away_team_id, start_time
+            SELECT game_id, home_team_id, away_team_id, start_time, season
             FROM games
             WHERE (home_team_id = :team_id OR away_team_id = :team_id)
               AND (
@@ -340,9 +395,9 @@ class ContextualFeatureEngine:
             LIMIT 1;
         """
         
-        # Query last game date to compute days_rest
+        # Query last game date and season to compute days_rest strictly within the same season
         query_last_game = """
-            SELECT gm.start_time
+            SELECT gm.start_time, gm.season
             FROM player_game_logs g
             JOIN games gm ON g.game_id = gm.game_id
             WHERE g.player_id = :player_id
@@ -360,11 +415,16 @@ class ContextualFeatureEngine:
             game_row = None
             last_game_row = None
 
-        # 1. Rest days
+        # 1. Rest days (if new season, reset to 3.0)
         if game_row and last_game_row:
             game_time = pd.to_datetime(game_row[3])
             last_game_time = pd.to_datetime(last_game_row[0])
-            days_rest = float((game_time - last_game_time).days)
+            game_season = game_row[4] if len(game_row) > 4 else None
+            last_game_season = last_game_row[1] if len(last_game_row) > 1 else None
+            if game_season and last_game_season and game_season != last_game_season:
+                days_rest = 3.0
+            else:
+                days_rest = float((game_time - last_game_time).days)
         else:
             days_rest = 3.0
         
@@ -392,6 +452,7 @@ class ContextualFeatureEngine:
             try:
                 with self.engine.connect() as conn:
                     metric_row = conn.execute(sqlalchemy.text(query_metrics), {"opp_id": opp_id, "game_time": game_row[3]}).fetchone()
+                    own_metric_row = conn.execute(sqlalchemy.text(query_metrics), {"opp_id": team_id, "game_time": game_row[3]}).fetchone()
                 if metric_row:
                     opp_def = float(metric_row[0])
                     opp_pace = float(metric_row[1])
@@ -401,15 +462,25 @@ class ContextualFeatureEngine:
                     opp_pace = 99.0
                     fallback_pos_allowed = {"PG": 24.0, "SG": 22.0, "SF": 21.0, "PF": 22.0, "C": 23.0}
                     opp_pos_pts = fallback_pos_allowed.get(position.upper(), 22.0)
+                    
+                if own_metric_row and metric_row:
+                    pace_diff = float(own_metric_row[1]) - opp_pace
+                else:
+                    pace_diff = 0.0
+                    
             except Exception as e:
                 logger.error(f"Error querying active matchup metrics: {e}")
                 opp_def = 115.0
                 opp_pace = 99.0
                 opp_pos_pts = 22.0
+                pace_diff = 0.0
         else:
             opp_def = 115.0
             opp_pace = 99.0
             opp_pos_pts = 22.0
+            pace_diff = 0.0
+            
+        is_home_game = 1.0 if game_row and int(game_row[1]) == team_id else 0.0
 
         # 3. Vacated usage for upcoming game
         co_stars = self.get_co_stars(team_id, exclude_player_id=player_id)
@@ -481,10 +552,12 @@ class ContextualFeatureEngine:
         # 4. Rolling tracking features for the active/upcoming game
         roll_pot_ast = 0.0
         roll_touches = 0.0
+        roll_passes_made = 0.0
+        roll_time_of_possession_sec = 0.0
         roll_def_dist = 4.5
 
         query_tracking = """
-            SELECT t.potential_assists, t.touches, t.avg_defender_distance_ft
+            SELECT t.potential_assists, t.touches, t.passes_made, t.time_of_possession_sec, t.avg_defender_distance_ft, t.shorthanded_points
             FROM player_tracking_logs t
             JOIN games gm ON t.game_id = gm.game_id
             WHERE t.player_id = :player_id
@@ -501,10 +574,16 @@ class ContextualFeatureEngine:
             if track_rows:
                 pot_ast_vals = [float(r[0]) if r[0] is not None else 0.0 for r in track_rows]
                 touch_vals = [float(r[1]) if r[1] is not None else 0.0 for r in track_rows]
-                def_dist_vals = [float(r[2]) if r[2] is not None else 4.5 for r in track_rows]
+                pass_vals = [float(r[2]) if r[2] is not None else 0.0 for r in track_rows]
+                top_vals = [float(r[3]) if r[3] is not None else 0.0 for r in track_rows]
+                def_dist_vals = [float(r[4]) if r[4] is not None else 4.5 for r in track_rows]
+                short_pts_vals = [float(r[5]) if r[5] is not None else 0.0 for r in track_rows]
                 roll_pot_ast = float(np.mean(pot_ast_vals))
                 roll_touches = float(np.mean(touch_vals))
+                roll_passes_made = float(np.mean(pass_vals))
+                roll_time_of_possession_sec = float(np.mean(top_vals))
                 roll_def_dist = float(np.mean(def_dist_vals))
+                roll_shorthanded_points = float(np.mean(short_pts_vals))
         except Exception as e:
             logger.error(f"Error querying active tracking features: {e}")
 
@@ -517,5 +596,10 @@ class ContextualFeatureEngine:
             "vacated_usage": float(vacated_usage),
             "roll_potential_assists": roll_pot_ast,
             "roll_touches": roll_touches,
+            "roll_passes_made": roll_passes_made,
+            "roll_time_of_possession_sec": roll_time_of_possession_sec,
             "roll_defender_distance": roll_def_dist,
+            "roll_shorthanded_points": locals().get("roll_shorthanded_points", 0.0),
+            "is_home_game": is_home_game,
+            "pace_differential": pace_diff
         }

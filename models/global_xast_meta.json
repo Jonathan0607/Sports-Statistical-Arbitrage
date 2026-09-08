@@ -2,16 +2,16 @@
   "target": "ast",
   "stat_column": "assists",
   "target_type": "residual",
-  "intercept": 0.0071220686778781205,
+  "intercept": 0.2620976184176407,
   "weights": [
-    0.08163379724823429,
-    0.630838170446601
+    0.08766496685314916,
+    0.7883522006791138
   ],
   "features": [
     "xgb_residual",
     "lgb_residual"
   ],
-  "alpha": 0.11296251474494338,
+  "alpha": 0.10278906650826652,
   "n_splits": 5,
-  "training_samples": 27926
+  "training_samples": 83909
 }

@@ -1,0 +1,86 @@
+{
+  "pts": {
+    "target": "pts",
+    "stat_column": "points",
+    "best_cv_mae": 4.61311107040163,
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.04484687798702288,
+      "colsample_bytree": 0.6180906332800672,
+      "subsample": 0.6168164310333297,
+      "reg_lambda": 55.55003832659562,
+      "reg_alpha": 7.785275305290059,
+      "objective": "reg:absoluteerror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.04484687798702288,
+      "colsample_bytree": 0.6180906332800672,
+      "subsample": 0.6168164310333297,
+      "reg_lambda": 55.55003832659562,
+      "reg_alpha": 7.785275305290059,
+      "objective": "mean_absolute_error",
+      "random_state": 42,
+      "verbose": -1
+    }
+  },
+  "reb": {
+    "target": "reb",
+    "stat_column": "rebounds",
+    "best_cv_mae": 1.9190827605940886,
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.04995477801286531,
+      "colsample_bytree": 0.701466666238395,
+      "subsample": 0.6495010316724175,
+      "reg_lambda": 248.73514318305112,
+      "reg_alpha": 5.243905771687711,
+      "objective": "reg:absoluteerror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.04995477801286531,
+      "colsample_bytree": 0.701466666238395,
+      "subsample": 0.6495010316724175,
+      "reg_lambda": 248.73514318305112,
+      "reg_alpha": 5.243905771687711,
+      "objective": "mean_absolute_error",
+      "random_state": 42,
+      "verbose": -1
+    }
+  },
+  "ast": {
+    "target": "ast",
+    "stat_column": "assists",
+    "best_cv_mae": 1.342116761694062,
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.02955747567852029,
+      "colsample_bytree": 0.6270409800840461,
+      "subsample": 0.5174051007160541,
+      "reg_lambda": 39.16166726202874,
+      "reg_alpha": 5.127418903764294,
+      "objective": "reg:absoluteerror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.02955747567852029,
+      "colsample_bytree": 0.6270409800840461,
+      "subsample": 0.5174051007160541,
+      "reg_lambda": 39.16166726202874,
+      "reg_alpha": 5.127418903764294,
+      "objective": "mean_absolute_error",
+      "random_state": 42,
+      "verbose": -1
+    }
+  }
+}

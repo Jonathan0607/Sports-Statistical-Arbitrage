@@ -1,0 +1,83 @@
+{
+  "reb": {
+    "target": "reb",
+    "stat_column": "rebounds",
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 2,
+      "learning_rate": 0.035,
+      "reg_alpha": 20.0,
+      "reg_lambda": 75.0,
+      "colsample_bytree": 0.5,
+      "subsample": 0.8,
+      "objective": "reg:squarederror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 2,
+      "learning_rate": 0.035,
+      "reg_alpha": 20.0,
+      "reg_lambda": 75.0,
+      "colsample_bytree": 0.5,
+      "subsample": 0.8,
+      "objective": "regression",
+      "random_state": 42,
+      "verbose": -1
+    }
+  },
+  "ast": {
+    "target": "ast",
+    "stat_column": "assists",
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 2,
+      "learning_rate": 0.040,
+      "reg_alpha": 15.0,
+      "reg_lambda": 50.0,
+      "colsample_bytree": 0.6,
+      "subsample": 0.7,
+      "objective": "reg:squarederror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 2,
+      "learning_rate": 0.040,
+      "reg_alpha": 15.0,
+      "reg_lambda": 50.0,
+      "colsample_bytree": 0.6,
+      "subsample": 0.7,
+      "objective": "regression",
+      "random_state": 42,
+      "verbose": -1
+    }
+  },
+  "pts": {
+    "target": "pts",
+    "stat_column": "points",
+    "xgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.045,
+      "reg_alpha": 50.0,
+      "reg_lambda": 90.0,
+      "colsample_bytree": 0.75,
+      "subsample": 0.65,
+      "objective": "reg:squarederror",
+      "random_state": 42
+    },
+    "lgb": {
+      "n_estimators": 150,
+      "max_depth": 3,
+      "learning_rate": 0.045,
+      "reg_alpha": 50.0,
+      "reg_lambda": 90.0,
+      "colsample_bytree": 0.75,
+      "subsample": 0.65,
+      "objective": "regression",
+      "random_state": 42,
+      "verbose": -1
+    }
+  }
+}

@@ -2,16 +2,16 @@
   "target": "fg3m",
   "stat_column": "three_pointers_made",
   "target_type": "residual",
-  "intercept": 0.002962151114098699,
+  "intercept": 0.27989636038379373,
   "weights": [
-    0.19449569515562468,
-    0.7813767809861186
+    0.08225561992784836,
+    0.9325419967869963
   ],
   "features": [
     "xgb_residual",
     "lgb_residual"
   ],
-  "alpha": 0.2379019831452287,
+  "alpha": 0.08496597574143977,
   "n_splits": 5,
-  "training_samples": 27926
+  "training_samples": 83909
 }

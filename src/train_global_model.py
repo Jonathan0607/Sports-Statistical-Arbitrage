@@ -37,11 +37,21 @@ FEATURE_COLUMNS = [
     'roll_min', 'roll_stat', 'roll_usg',
     'days_rest', 'is_back_to_back', 'opp_def_rating', 'opp_pace_factor',
     'opp_pos_pts_allowed', 'vacated_usage',
-    'roll_potential_assists', 'roll_touches', 'roll_defender_distance'
+    'roll_potential_assists', 'roll_touches', 'roll_passes_made',
+    'roll_time_of_possession_sec', 'roll_defender_distance',
+    'is_home_game', 'pace_differential', 'roll_stat_var', 'roll_residual',
+    'roll_ts_pct', 'roll_reb_rate', 'roll_ast_rate', 'roll_shorthanded_points',
+    'roll_plus_minus', 'roll_usg_efficiency',
+    'player_id', 'team_id', 'opponent_team_id'
 ]
 
 
-def train_global_ensemble():
+def train_global_ensemble(
+    target_keys: list = None,
+    config_path: str = "config/stat_hyperparameters.json",
+    train_seasons: list = None,
+    model_dir: str = "models"
+):
     """
     Trains a Meta-Ensemble (Stacking) predictive layer across all target statistics:
     1. Base Model 1: XGBoost Regressor
@@ -88,14 +98,33 @@ def train_global_ensemble():
                 df_p['roll_min'] = df_p['minutes_played'].shift(1).ewm(alpha=0.3, adjust=False).mean()
                 df_p['roll_usg'] = df_p['usage_rate'].shift(1).ewm(alpha=0.3, adjust=False).mean()
 
-                for col, default in [('potential_assists', 0.0), ('touches', 0.0), ('avg_defender_distance_ft', 4.5)]:
+                for col, default in [
+                    ('potential_assists', 0.0), ('touches', 0.0), ('passes_made', 0.0), 
+                    ('time_of_possession_sec', 0.0), ('avg_defender_distance_ft', 4.5),
+                    ('shorthanded_points', 0.0), ('pace_differential', 0.0)
+                ]:
                     if col not in df_p.columns:
                         df_p[col] = default
                     else:
                         df_p[col] = df_p[col].fillna(default)
+                        
                 df_p['roll_potential_assists'] = df_p['potential_assists'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
                 df_p['roll_touches'] = df_p['touches'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
+                df_p['roll_passes_made'] = df_p['passes_made'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
+                df_p['roll_time_of_possession_sec'] = df_p['time_of_possession_sec'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
                 df_p['roll_defender_distance'] = df_p['avg_defender_distance_ft'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(4.5)
+                df_p['roll_shorthanded_points'] = df_p['shorthanded_points'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
+                
+                df_p['ts_pct'] = df_p['points'] / (2 * (df_p['field_goals_attempted'] + 0.44 * df_p['free_throws_attempted']) + 1e-5)
+                df_p['reb_rate'] = (df_p['rebounds'] / (df_p['minutes_played'] + 1e-5)) * 36.0
+                df_p['ast_rate'] = (df_p['assists'] / (df_p['minutes_played'] + 1e-5)) * 36.0
+                df_p['usg_efficiency'] = df_p['points'] / ((df_p['usage_rate'] * df_p['minutes_played']) + 1e-5)
+
+                df_p['roll_ts_pct'] = df_p['ts_pct'].shift(1).ewm(alpha=0.3, adjust=False).mean()
+                df_p['roll_reb_rate'] = df_p['reb_rate'].shift(1).ewm(alpha=0.3, adjust=False).mean()
+                df_p['roll_ast_rate'] = df_p['ast_rate'].shift(1).ewm(alpha=0.3, adjust=False).mean()
+                df_p['roll_plus_minus'] = df_p['plus_minus'].shift(1).ewm(alpha=0.3, adjust=False).mean()
+                df_p['roll_usg_efficiency'] = df_p['usg_efficiency'].shift(1).ewm(alpha=0.3, adjust=False).mean()
                 
                 for stat_col in TARGET_METRICS.values():
                     if stat_col not in df_p.columns:
@@ -105,29 +134,30 @@ def train_global_ensemble():
         except Exception as e:
             logger.error(f"Error compiling features for player {pid}: {e}")
 
-    os.makedirs("models", exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
 
     xgb_params = {
-        "n_estimators": 150, 
-        "max_depth": 5, 
+        "objective": "reg:absoluteerror",
+        "eval_metric": "mae",
+        "tree_method": "hist",
+        "enable_categorical": True,
+        "n_estimators": 150,
+        "max_depth": 4,
         "learning_rate": 0.05,
-        "colsample_bytree": 0.7, 
-        "subsample": 0.8, 
-        "reg_lambda": 1.5,
-        "reg_alpha": 0.5, 
-        "objective": "reg:squarederror",
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
         "random_state": 42
     }
 
     lgb_params = {
-        "n_estimators": 150,
-        "max_depth": 5,
+        "objective": "regression_l1",
+        "metric": "mae",
+        "boosting_type": "gbdt",
         "learning_rate": 0.05,
-        "colsample_bytree": 0.7,
-        "subsample": 0.8,
-        "reg_lambda": 1.5,
-        "reg_alpha": 0.5,
-        "objective": "regression",
+        "num_leaves": 31,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 1,
         "random_state": 42,
         "verbose": -1
     }
@@ -136,23 +166,30 @@ def train_global_ensemble():
         logger.info(f"Preparing training data for target: {target_key} (col: {stat_col})")
         all_dfs = []
         for pid, df_p in all_player_dfs.items():
-            df_temp = df_p.copy()
-            position = player_positions.get(pid, "SG")
-            prior_per_36 = get_positional_prior(stat_col, position, cached_priors=cached_priors)
+            df = df_p.copy()
+            if stat_col not in df.columns:
+                continue
+
+            df['roll_stat'] = df.groupby('player_id')[stat_col].shift(1).ewm(alpha=0.3, adjust=False).mean()
+            df['roll_stat_var'] = df.groupby('player_id')[stat_col].shift(1).ewm(alpha=0.3, adjust=False).var().fillna(0.0)
             
-            df_temp['roll_stat_raw'] = df_temp[stat_col].shift(1).ewm(alpha=0.3, adjust=False).mean()
-            df_temp['cum_min'] = df_temp['minutes_played'].shift(1).cumsum().fillna(0.0)
-            df_temp['roll_stat_per_36'] = (df_temp['roll_stat_raw'] / (df_temp['roll_min'] + 1e-5)) * 36
+            # Bayesian shrinkage for residuals
+            position = player_positions.get(df['player_id'].iloc[0], "SG")
+            prior_per_36 = cached_priors.get(stat_col, {}).get(position, 15.0)
             
-            df_temp['bayesian_roll_stat_per_36'] = df_temp.apply(
-                lambda row: apply_bayesian_shrinkage(row['roll_stat_per_36'], row['cum_min'], prior_per_36, K=500.0),
-                axis=1
-            )
-            df_temp['roll_stat'] = (df_temp['bayesian_roll_stat_per_36'] / 36.0) * df_temp['roll_min']
+            df['roll_stat_per_36'] = (df['roll_stat'] / (df['roll_min'] + 1e-5)) * 36.0
+            cum_min = df.groupby('player_id')['minutes_played'].cumsum()
             
-            df_temp['target_residual'] = df_temp[stat_col] - df_temp['roll_stat']
+            df['bayesian_roll_per_36'] = [
+                apply_bayesian_shrinkage(rs_36, cm, prior_per_36, K=500.0)
+                for rs_36, cm in zip(df['roll_stat_per_36'], cum_min)
+            ]
+            df['bayesian_roll_stat'] = (df['bayesian_roll_per_36'] / 36.0) * df['roll_min']
             
-            all_dfs.append(df_temp)
+            df['target_residual'] = df[stat_col] - df['bayesian_roll_stat']
+            df['roll_residual'] = df.groupby('player_id')['target_residual'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
+            
+            all_dfs.append(df)
             
         if not all_dfs:
             continue
@@ -162,16 +199,25 @@ def train_global_ensemble():
             df['start_time'] = pd.to_datetime(df['start_time'], utc=True)
             df = df.sort_values('start_time').reset_index(drop=True)
 
-        train_df = df.dropna(subset=FEATURE_COLUMNS + ['target_residual', stat_col]).copy()
         for col in FEATURE_COLUMNS + ['target_residual', stat_col]:
-            train_df[col] = pd.to_numeric(train_df[col], errors='coerce').astype(float)
-        train_df = train_df.dropna(subset=FEATURE_COLUMNS + ['target_residual', stat_col]).reset_index(drop=True)
+            if col in ['player_id', 'team_id', 'opponent_team_id']:
+                df[col] = df[col].astype('category')
+            else:
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
         
+        train_df = df.dropna(subset=FEATURE_COLUMNS + ['target_residual', stat_col]).copy()
+        if train_df.empty:
+            logger.warning(f"No valid data remaining for {target_key} after NA drop.")
+            continue
+            
+        for cat_col in ['player_id', 'team_id', 'opponent_team_id']:
+            train_df[cat_col] = train_df[cat_col].astype('category')
+            
         logger.info(f"Target {target_key} clean training logs: {len(train_df)}")
         if len(train_df) < 20:
             continue
             
-        X_train = train_df[FEATURE_COLUMNS].values
+        X_train = train_df[FEATURE_COLUMNS]
         y_train = train_df['target_residual'].values
 
         n_splits = 5
@@ -183,7 +229,7 @@ def train_global_ensemble():
 
         logger.info(f"Generating OOF residual predictions via {n_splits}-split TimeSeriesSplit for {target_key}...")
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
-            X_f_train, X_f_val = X_train[train_idx], X_train[val_idx]
+            X_f_train, X_f_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
             y_f_train, y_f_val = y_train[train_idx], y_train[val_idx]
 
             fold_xgb = xgb.XGBRegressor(**xgb_params)
