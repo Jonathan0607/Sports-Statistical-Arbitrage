@@ -13,13 +13,17 @@ build/
 *.so
 *.dylib
 
-# Local Infrastructure & Data
-pgdata/
+# Dynamic Caches & Logs
 logs/*
 !logs/.gitkeep
+scrapers/sharp_cache.json
 
-# Model Artifacts (Ignore expanding walk-forward folds, track only global baselines)
+# Generated Model Artifacts
+models/*.json
+models/*.txt
+models/*.pkl
 models/wf_fold*/*
+!models/.gitkeep
 
 # OS Files
 .DS_Store
