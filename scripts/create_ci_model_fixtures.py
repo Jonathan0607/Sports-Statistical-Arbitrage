@@ -109,17 +109,20 @@ def seed_ci_models(
         y = rng.normal(0.0, 1.5, size=n).astype(float)
 
         for target_key, stat_col in TARGET_METRICS.items():
-            xgb_model = xgb.XGBRegressor(
-                n_estimators=4,
-                max_depth=2,
-                learning_rate=0.1,
-                enable_categorical=True,
-                tree_method="hist",
-                random_state=42,
+            dmat_xgb = xgb.DMatrix(X, label=y, enable_categorical=True)
+            xgb_booster = xgb.train(
+                {
+                    "objective": "reg:absoluteerror",
+                    "max_depth": 2,
+                    "learning_rate": 0.1,
+                    "tree_method": "hist",
+                    "seed": 42,
+                },
+                dmat_xgb,
+                num_boost_round=4,
             )
-            xgb_model.fit(X, y)
-            xgb_model.save_model(os.path.join(model_dir, f"global_x{target_key}_xgb.json"))
-            xgb_model.save_model(os.path.join(model_dir, f"global_x{target_key}.json"))
+            xgb_booster.save_model(os.path.join(model_dir, f"global_x{target_key}_xgb.json"))
+            xgb_booster.save_model(os.path.join(model_dir, f"global_x{target_key}.json"))
 
             dtrain = lgb.Dataset(X, label=y, categorical_feature=list(CATEGORICAL_ID_COLUMNS))
             lgb_model = lgb.train(
@@ -184,9 +187,11 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", default="models/wf_fold2")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--seed-ci-registry", action="store_true")
+    parser.add_argument("--registry-dir", default="models/registry")
     args = parser.parse_args()
     seed_ci_models(
         model_dir=args.model_dir,
         force=args.force,
         seed_ci_registry=args.seed_ci_registry,
+        registry_dir=args.registry_dir,
     )
