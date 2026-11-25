@@ -8,6 +8,7 @@ import math
 import os
 import subprocess
 import time
+import uuid
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,6 +18,7 @@ import pandas as pd
 import xgboost as xgb
 from scipy import stats
 
+from src.drift_monitor import DriftAction, DriftMonitor
 from src.execution import DEFAULT_CORRELATIONS
 from src.feature_contract import (
     FEATURE_COLUMNS,
@@ -27,6 +29,7 @@ from src.feature_contract import (
     get_active_feature_columns,
     predict_meta_ensemble,
 )
+from src.model_registry import DEFAULT_REGISTRY_DIR, ModelRegistry
 from src.models import MarketMicrostructure, get_default_priors, get_positional_prior
 from src.risk import RiskManager, _HAS_CPP_KELLY, _quant_core
 from src.serving.schemas import (
@@ -36,6 +39,7 @@ from src.serving.schemas import (
     BatchPredictRequest,
     BatchPredictResponse,
     CopulaTypeEnum,
+    DriftReportResponse,
     HealthResponse,
     JointPairPricing,
     PredictionItemRequest,
@@ -70,15 +74,30 @@ class InferencePredictor:
         model_dir: Optional[str] = None,
         redis_client: Any = None,
         auto_connect_redis: bool = True,
+        registry: Optional[ModelRegistry] = None,
+        registry_dir: Optional[str] = None,
+        drift_monitor: Optional[DriftMonitor] = None,
+        telemetry_db_url: Optional[str] = None,
+        log_predictions: Optional[bool] = None,
     ):
+        self.registry = registry or ModelRegistry(registry_dir or DEFAULT_REGISTRY_DIR)
+        champion = self.registry.get_champion()
+        self.registry_champion_id: Optional[str] = (
+            champion.get("version_id") if isinstance(champion, dict) else None
+        )
+
         resolved_dir = model_dir or os.getenv("MODEL_DIR")
+        if not resolved_dir and champion and champion.get("model_dir") and os.path.exists(champion["model_dir"]):
+            resolved_dir = champion["model_dir"]
         if not resolved_dir:
             resolved_dir = "models/wf_fold2" if os.path.exists("models/wf_fold2") else "models"
         self.model_dir = resolved_dir
         self.git_sha = _resolve_git_sha()
-        self.model_version = os.getenv(
-            "MODEL_VERSION", f"{os.path.basename(os.path.abspath(self.model_dir))}:{self.git_sha}"
+        default_version = (
+            self.registry_champion_id
+            or f"{os.path.basename(os.path.abspath(self.model_dir))}:{self.git_sha}"
         )
+        self.model_version = os.getenv("MODEL_VERSION") or default_version
         self.models: Dict[str, Dict[str, Any]] = {}
         self.known_players: Dict[str, set] = {}
         self.cached_priors = {
@@ -86,6 +105,16 @@ class InferencePredictor:
             "WNBA": get_default_priors("WNBA"),
         }
         self._load_artifacts()
+
+        self.drift_monitor = drift_monitor or DriftMonitor(db_url=telemetry_db_url)
+        if log_predictions is None:
+            self.log_predictions = os.getenv("DRIFT_LOG_PREDICTIONS", "true").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+        else:
+            self.log_predictions = bool(log_predictions)
 
         self.redis_client = redis_client
         if self.redis_client is None and auto_connect_redis:
@@ -163,6 +192,13 @@ class InferencePredictor:
         redis_ok, redis_status = self.check_redis_health()
         loaded = sorted(self.models.keys())
         status = "healthy" if loaded else "degraded"
+        drift_action = DriftAction.HEALTHY
+        fallback_active = False
+        if self.drift_monitor is not None:
+            try:
+                drift_action, fallback_active = self.drift_monitor.current_status()
+            except Exception as exc:
+                logger.warning(f"Drift status evaluation error during health check: {exc}")
         return HealthResponse(
             status=status,
             model_version=self.model_version,
@@ -172,6 +208,33 @@ class InferencePredictor:
             redis_connected=redis_ok,
             redis_status=redis_status,
             cpp_eigen_available=bool(_HAS_CPP_KELLY),
+            drift_status=drift_action.value,
+            fallback_active=fallback_active,
+            registry_champion_id=self.registry_champion_id,
+        )
+
+    def drift_report(self, window_days: int = 7) -> DriftReportResponse:
+        report = (
+            self.drift_monitor.evaluate_drift(window_days=window_days)
+            if self.drift_monitor is not None
+            else {
+                "timestamp": "",
+                "window_days": window_days,
+                "total_predictions": 0,
+                "settled_predictions": 0,
+                "action": DriftAction.HEALTHY.value,
+                "fallback_active": False,
+                "reasons": [],
+                "calibration": {},
+                "covariate_drift": {},
+                "thresholds": {},
+            }
+        )
+        return DriftReportResponse(
+            schema_version=FEATURE_SCHEMA_VERSION,
+            model_version=self.model_version,
+            git_sha=self.git_sha,
+            **report,
         )
 
     def fetch_player_history_from_redis(self, player_id: str) -> pd.DataFrame:
@@ -294,17 +357,36 @@ class InferencePredictor:
 
     def predict_batch(self, req: BatchPredictRequest) -> BatchPredictResponse:
         t0 = time.perf_counter_ns()
+        fallback_active = False
+        if self.drift_monitor is not None:
+            try:
+                _, fallback_active = self.drift_monitor.current_status()
+            except Exception as exc:
+                logger.warning(f"Failed resolving drift circuit-breaker status: {exc}")
+
         prepared = [self._prepare_item(i, item) for i, item in enumerate(req.requests)]
 
         # Group non-fallback items by (league, stat_key) for vectorized batch inference
         grouped: Dict[Tuple[str, str], List[tuple]] = defaultdict(list)
         responses: List[Optional[PredictionItemResponse]] = [None] * len(req.requests)
+        telemetry_records: List[Dict[str, Any]] = []
+
+        def _build_snapshot(feat_series: Optional[pd.Series]) -> Dict[str, Any]:
+            if feat_series is None:
+                return {}
+            snap: Dict[str, Any] = {}
+            for k, v in feat_series.items():
+                if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+                    fv = float(v)
+                    if math.isfinite(fv):
+                        snap[str(k)] = fv
+            return snap
 
         for entry in prepared:
             idx, feat_series, ewma_baseline, pid, cold_start, pi_override, alpha_override, hist_df = entry
             item = req.requests[idx]
             target_key = item.stat.value
-            if feat_series is not None and target_key in self.models:
+            if not fallback_active and feat_series is not None and target_key in self.models:
                 grouped[(item.league.value, target_key)].append(entry)
             else:
                 meta_data = self.models.get(target_key, {}).get("meta", {})
@@ -316,7 +398,10 @@ class InferencePredictor:
                     else self._estimate_zero_inflation(hist_df, TARGET_METRICS[target_key], ewma_baseline, n_nb)
                 )
                 mu_val = max(0.001, float(ewma_baseline))
+                surv = self._compute_survival(mu_val, n_nb, pi_val, item.thresholds)
+                pred_id = uuid.uuid4().hex
                 responses[idx] = PredictionItemResponse(
+                    prediction_id=pred_id,
                     player_id=pid,
                     stat=item.stat,
                     league=item.league,
@@ -332,9 +417,25 @@ class InferencePredictor:
                         zero_inflation_prob=pi_val,
                         n_nb=n_nb,
                     ),
-                    survival_probabilities=self._compute_survival(mu_val, n_nb, pi_val, item.thresholds),
+                    survival_probabilities=surv,
                     cold_start=cold_start,
+                    fallback_active=fallback_active,
                 )
+                if self.log_predictions and self.drift_monitor is not None:
+                    telemetry_records.append(
+                        {
+                            "prediction_id": pred_id,
+                            "model_version": self.model_version,
+                            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                            "player_id": pid,
+                            "stat_key": target_key,
+                            "predicted_mean": mu_val,
+                            "ewma_baseline": mu_val,
+                            "predicted_prob": surv[0].prob_over if surv else None,
+                            "line": surv[0].threshold if surv else None,
+                            "feature_snapshot": _build_snapshot(feat_series),
+                        }
+                    )
 
         for (league_key, target_key), entries in grouped.items():
             stat_col = TARGET_METRICS[target_key]
@@ -364,7 +465,7 @@ class InferencePredictor:
 
             default_alpha = float(meta_data.get("alpha", 0.25))
             for local_i, entry in enumerate(entries):
-                idx, _, ewma_baseline, pid, cold_start, pi_override, alpha_override, hist_df = entry
+                idx, feat_series, ewma_baseline, pid, cold_start, pi_override, alpha_override, hist_df = entry
                 item = req.requests[idx]
                 mu_val = float(preds["meta_prediction"][local_i])
                 alpha_disp = float(alpha_override or default_alpha)
@@ -374,7 +475,10 @@ class InferencePredictor:
                     if item.features is not None and item.features.zero_inflation_prob is not None
                     else self._estimate_zero_inflation(hist_df, stat_col, mu_val, n_nb)
                 )
+                surv = self._compute_survival(mu_val, n_nb, pi_val, item.thresholds)
+                pred_id = uuid.uuid4().hex
                 responses[idx] = PredictionItemResponse(
+                    prediction_id=pred_id,
                     player_id=pid,
                     stat=item.stat,
                     league=item.league,
@@ -390,9 +494,31 @@ class InferencePredictor:
                         zero_inflation_prob=pi_val,
                         n_nb=n_nb,
                     ),
-                    survival_probabilities=self._compute_survival(mu_val, n_nb, pi_val, item.thresholds),
+                    survival_probabilities=surv,
                     cold_start=cold_start,
+                    fallback_active=False,
                 )
+                if self.log_predictions and self.drift_monitor is not None:
+                    telemetry_records.append(
+                        {
+                            "prediction_id": pred_id,
+                            "model_version": self.model_version,
+                            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                            "player_id": pid,
+                            "stat_key": target_key,
+                            "predicted_mean": mu_val,
+                            "ewma_baseline": float(ewma_baseline),
+                            "predicted_prob": surv[0].prob_over if surv else None,
+                            "line": surv[0].threshold if surv else None,
+                            "feature_snapshot": _build_snapshot(feat_series),
+                        }
+                    )
+
+        if self.log_predictions and self.drift_monitor is not None and telemetry_records:
+            try:
+                self.drift_monitor.log_predictions(telemetry_records)
+            except Exception as exc:
+                logger.warning(f"Non-fatal prediction telemetry write failure: {exc}")
 
         latency_ms = (time.perf_counter_ns() - t0) / 1e6
         return BatchPredictResponse(
@@ -400,6 +526,7 @@ class InferencePredictor:
             model_version=self.model_version,
             predictions=[r for r in responses if r is not None],
             latency_ms=latency_ms,
+            fallback_active=fallback_active,
         )
 
     @staticmethod

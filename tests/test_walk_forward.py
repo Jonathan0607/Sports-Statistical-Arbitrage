@@ -21,31 +21,11 @@ def test_walk_forward_initialization():
 def test_walk_forward_run_mocked():
     backtester = WalkForwardBacktester(target_keys=["pts", "reb"], max_box_scores=50, retrain=True)
 
-    mock_summary = {
-        "overall": {
-            "count": 100,
-            "meta_mae": 3.12,
-            "ewma_mae": 3.45,
-            "crps": 2.25,
-            "mae_improvement_pct": 9.56,
-        },
-        "by_category": {
-            "Points": {
-                "count": 50,
-                "meta_mae": 4.50,
-                "ewma_mae": 5.00,
-                "crps": 3.10,
-                "mae_improvement_pct": 10.0,
-            },
-            "Rebounds": {
-                "count": 50,
-                "meta_mae": 1.74,
-                "ewma_mae": 1.90,
-                "crps": 1.40,
-                "mae_improvement_pct": 8.42,
-            },
-        },
-    }
+    mock_summary = [
+        {"Category": "Points", "Count": 50, "Meta MAE": 4.50, "EWMA MAE": 5.00, "Sim CRPS": 3.10},
+        {"Category": "Rebounds", "Count": 50, "Meta MAE": 1.74, "EWMA MAE": 1.90, "Sim CRPS": 1.40},
+        {"Category": "OVERALL", "Count": 100, "Meta MAE": 3.12, "EWMA MAE": 3.45, "Sim CRPS": 2.25},
+    ]
 
     with patch("src.walk_forward_backtester.train_global_ensemble") as mock_train, \
          patch("src.walk_forward_backtester.HistoricalReplayCore") as mock_replay_cls:
@@ -76,16 +56,16 @@ def test_walk_forward_run_mocked():
         # Check results structure
         assert "Fold 1" in results
         assert "Fold 2" in results
-        assert results["Fold 1"]["summary"]["overall"]["meta_mae"] == 3.12
+        overall_row = [r for r in results["Fold 1"]["summary"] if r["Category"] == "OVERALL"][0]
+        assert overall_row["Meta MAE"] == 3.12
 
 
 def test_walk_forward_tuning_modes():
     """Verify tuning modes correctly pass config_path to train_global_ensemble."""
-    
-    mock_summary = {
-        "overall": {"count": 10, "meta_mae": 1.0, "ewma_mae": 1.0, "crps": 1.0, "mae_improvement_pct": 0.0},
-        "by_category": {}
-    }
+
+    mock_summary = [
+        {"Category": "OVERALL", "Count": 10, "Meta MAE": 1.0, "EWMA MAE": 1.0, "Sim CRPS": 1.0}
+    ]
     
     with patch("src.walk_forward_backtester.train_global_ensemble") as mock_train, \
          patch("src.walk_forward_backtester.HistoricalReplayCore") as mock_replay_cls, \

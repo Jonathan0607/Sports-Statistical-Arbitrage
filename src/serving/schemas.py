@@ -260,6 +260,7 @@ class ThresholdSurvival(StrictBaseModel):
 
 
 class PredictionItemResponse(StrictBaseModel):
+    prediction_id: Optional[str] = None
     player_id: str
     stat: StatKeyEnum
     league: LeagueEnum
@@ -272,6 +273,7 @@ class PredictionItemResponse(StrictBaseModel):
     zinb: ZINBParams
     survival_probabilities: List[ThresholdSurvival] = Field(default_factory=list)
     cold_start: bool = False
+    fallback_active: bool = False
 
 
 class BatchPredictResponse(StrictBaseModel):
@@ -279,6 +281,7 @@ class BatchPredictResponse(StrictBaseModel):
     model_version: str
     predictions: List[PredictionItemResponse]
     latency_ms: float = Field(..., ge=0.0)
+    fallback_active: bool = False
 
 
 class AllocateCandidateOutcome(StrictBaseModel):
@@ -395,6 +398,25 @@ class HealthResponse(StrictBaseModel):
     redis_connected: bool
     redis_status: str
     cpp_eigen_available: bool
+    drift_status: str = "HEALTHY"
+    fallback_active: bool = False
+    registry_champion_id: Optional[str] = None
+
+
+class DriftReportResponse(BaseModel):
+    schema_version: str = FEATURE_SCHEMA_VERSION
+    model_version: str
+    git_sha: str
+    timestamp: str
+    window_days: int
+    total_predictions: int
+    settled_predictions: int
+    action: str
+    fallback_active: bool
+    reasons: List[str] = Field(default_factory=list)
+    calibration: Dict[str, Any] = Field(default_factory=dict)
+    covariate_drift: Dict[str, Any] = Field(default_factory=dict)
+    thresholds: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):

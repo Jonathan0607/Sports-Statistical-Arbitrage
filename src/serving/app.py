@@ -18,6 +18,7 @@ from src.serving.schemas import (
     AllocateResponse,
     BatchPredictRequest,
     BatchPredictResponse,
+    DriftReportResponse,
     ErrorResponse,
     HealthResponse,
 )
@@ -73,6 +74,10 @@ def create_app(predictor: Optional[InferencePredictor] = None) -> FastAPI:
     @application.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return _get_predictor().health()
+
+    @application.get("/v1/drift", response_model=DriftReportResponse)
+    def drift(window_days: int = 7) -> DriftReportResponse:
+        return _get_predictor().drift_report(window_days=window_days)
 
     @application.post("/v1/predict", response_model=BatchPredictResponse)
     def predict(request_body: BatchPredictRequest) -> BatchPredictResponse:

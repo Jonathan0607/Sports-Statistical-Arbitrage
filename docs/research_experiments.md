@@ -446,3 +446,7 @@ All evaluations are measured against a standardized Point-in-Time historical rep
 
 - **Diagnostic Comparison vs. Superseded Experiment 12:** Removing future-season training contamination (`83,909 → 27,471` Fold 1 / `55,006` Fold 2 training logs), full-career `assign_player_tier()` lookahead, unshifted `cum_min`, intra-day CV splits, and in-sample dispersion calibration raises true out-of-sample OVERALL MAE from the leaked Exp 12 readings (`2.435` / `2.398`) to **`2.644`** (Fold 1) and **`2.624`** (Fold 2). Critically, the leak-free Meta-Ensemble **still outperforms the causal cohort-EWMA baseline in every stat across both folds** (`+0.77%` to `+1.99%`) and **honestly clears the `< 4.65` Points MAE threshold in both Fold 1 (`4.642`) and Fold 2 (`4.594`)**.
 
+- **Phase 2 Model Governance & Drift Safeguards:**
+  - Clean Fold 2 (`models/wf_fold2`) artifacts are registered in `models/registry/champion.json` as initial champion **`v2026.11.25-4c884cd`** with SHA-256 integrity verification (`28` files) and training covariate baselines persisted to `models/registry/reference_stats.json` (`55,055` rows, `13` numeric covariates).
+  - Future candidate models must clear `ModelRegistry.promote_challenger()` (`feature_schema_version == "1.0.0"`, verified SHA-256 digests, beating both `ewma_mae = 2.663` and incumbent `overall_mae = 2.624` / `overall_crps = 1.887`) before promotion; serving predictions are continuously monitored by `DriftMonitor` (`GET /v1/drift`) with automatic EWMA fallback on calibration or covariate drift breaches.
+

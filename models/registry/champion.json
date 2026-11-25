@@ -1,0 +1,77 @@
+{
+  "version_id": "v2026.11.25-4c884cd",
+  "git_sha": "4c884cd",
+  "registered_at": "2026-11-25T17:34:53.229398+00:00",
+  "promoted_at": "2026-11-25T17:34:53.229398+00:00",
+  "status": "champion",
+  "model_dir": "models/wf_fold2",
+  "feature_schema_version": "1.0.0",
+  "train_seasons": [
+    "2023-24",
+    "2024-25"
+  ],
+  "training_samples": 55006,
+  "targets": [
+    "pts",
+    "reb",
+    "ast",
+    "fg3m",
+    "stl",
+    "blk",
+    "tov"
+  ],
+  "artifact_checksums": {
+    "global_xpts_xgb.json": "756a40cd5d2443ba327029196082bc688fee80913867872e57a85f8cd0ed343b",
+    "global_xpts_lgb.txt": "968d082eace93cd400d35dfc35a8671779085656892da403ffc83b4bb7d7f029",
+    "global_xpts_meta.json": "14134157f81533216dbd4812efe6d2b86834e0728e1ce02761859b0899bc6c72",
+    "global_xpts.json": "756a40cd5d2443ba327029196082bc688fee80913867872e57a85f8cd0ed343b",
+    "global_xreb_xgb.json": "85b896ec714f049df80e10d528c3cd567b84ced6045f06d454cd27ec0f443c86",
+    "global_xreb_lgb.txt": "dc1be40b03585e40b364c0eb978445136c1d35ffe5e0dad2075ab8367b5f3287",
+    "global_xreb_meta.json": "58ab77f14c617ee9d738f370dd63d0e2dff17a6b5c066f704000b68ebb769834",
+    "global_xreb.json": "85b896ec714f049df80e10d528c3cd567b84ced6045f06d454cd27ec0f443c86",
+    "global_xast_xgb.json": "b8223266501f7fa526daa8e0bbf0baeb613f7f20f65e21c38c30953be8439925",
+    "global_xast_lgb.txt": "e8c74fbbe0a67e936ca3d5e052b6e4a9be65130d390baad778421d6acd02acc3",
+    "global_xast_meta.json": "979117c0fdaa6b1298fddcbc77d0b8f2a857540af1ae3e217aa94dab06cb46ab",
+    "global_xast.json": "b8223266501f7fa526daa8e0bbf0baeb613f7f20f65e21c38c30953be8439925",
+    "global_xfg3m_xgb.json": "68f30f21556c8550bdfc38d430e3661677d41810d4287abc5de54f9464ede929",
+    "global_xfg3m_lgb.txt": "be2ac56d2588f713fed15dd280bd7d9fe3addcfaf5647b11a78ad7e584a555a0",
+    "global_xfg3m_meta.json": "b482180eb998d32f5146c41f3b6a0629f2e18c5b372b1b7346c59419f5bb9de3",
+    "global_xfg3m.json": "68f30f21556c8550bdfc38d430e3661677d41810d4287abc5de54f9464ede929",
+    "global_xstl_xgb.json": "0ac12248458be9e3e92cd8ca1b88dd5dcac61abb1566e2b46809941d2cc4b899",
+    "global_xstl_lgb.txt": "4c38d3b956d9c8ebf7c6930e1c103a0e6a3fe6a17fbffe7aa383cc4fbe3ffa22",
+    "global_xstl_meta.json": "96bc8b8b10f34df9d5df1c5746e9ed144f8cba1ba7349c0c89845696f7e38003",
+    "global_xstl.json": "0ac12248458be9e3e92cd8ca1b88dd5dcac61abb1566e2b46809941d2cc4b899",
+    "global_xblk_xgb.json": "92b8cc7fe40f0aed7861085d2dc8fcf3bc54e64826fe7327f9a8e526798ef2bc",
+    "global_xblk_lgb.txt": "941fae1d81eeda8b99dd15e5e2a1fb8396b831a5460f8573c0fc490999ebc6e9",
+    "global_xblk_meta.json": "82ae2115a5d52b5349a18e8765dab22a7cba3cc65e1a813e1b4b73657f38b9ba",
+    "global_xblk.json": "92b8cc7fe40f0aed7861085d2dc8fcf3bc54e64826fe7327f9a8e526798ef2bc",
+    "global_xtov_xgb.json": "9f555bd0f19a9f33ef0e3dd5f9e25fc6e305fbe0e2fc869b2748a4d1ca90a0fd",
+    "global_xtov_lgb.txt": "e29936510392d4b2dc124774eb2ffe7970e1d4cd9abc5e65b2d0da80e36a8e1d",
+    "global_xtov_meta.json": "6240c012b331a2b771525265f4d43ac85c00d396164cea6dfa35f4f85799129a",
+    "global_xtov.json": "9f555bd0f19a9f33ef0e3dd5f9e25fc6e305fbe0e2fc869b2748a4d1ca90a0fd"
+  },
+  "metrics": {
+    "overall_mae": 2.6242967420400256,
+    "overall_crps": 1.8871563377328853,
+    "ewma_mae": 2.663042766914526,
+    "brier_score": null,
+    "by_stat": {
+      "pts": {
+        "meta_mae": 4.594,
+        "ewma_mae": 4.678,
+        "sim_crps": 3.397
+      },
+      "reb": {
+        "meta_mae": 1.923,
+        "ewma_mae": 1.938,
+        "sim_crps": 1.338
+      },
+      "ast": {
+        "meta_mae": 1.355,
+        "ewma_mae": 1.373,
+        "sim_crps": 0.927
+      }
+    }
+  },
+  "notes": "Clean Phase 1 Fold 2 walk-forward ensemble (strictly point-in-time, schema 1.0.0)"
+}

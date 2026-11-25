@@ -43,11 +43,14 @@ RUN PYBIND_CMAKE_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir(
 
 FROM python:3.11-slim AS runtime
 
+ARG GIT_SHA=unknown
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     PATH="/opt/venv/bin:$PATH" \
-    MODEL_DIR=models/wf_fold2
+    MODEL_DIR=models/wf_fold2 \
+    GIT_SHA=${GIT_SHA}
 
 WORKDIR /app
 

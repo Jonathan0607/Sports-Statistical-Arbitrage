@@ -35,3 +35,8 @@ pgdata/
 *.log
 *.sqlite
 *.db
+
+pp_headers.json
+scratch_*.py
+sandbox/
+sandbox_models/

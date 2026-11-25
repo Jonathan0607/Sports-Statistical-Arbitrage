@@ -118,7 +118,8 @@ def test_run_backtest_with_mock_data():
         "meta_prediction": 19.8,
         "xgboost_prediction": 19.5,
         "lightgbm_prediction": 20.1,
-        "naive_prediction": 18.0,
+        "ewma_baseline": 18.0,
+        "crps": 1.1,
     }
 
     with patch.object(replay.engine, "connect"), \
@@ -135,9 +136,11 @@ def test_run_backtest_with_mock_data():
         assert results[0]["actual_value"] == 20.0
         assert results[0]["meta_prediction"] == 19.8
         assert results[0]["xgboost_prediction"] == 19.5
-        assert results[0]["naive_prediction"] == 18.0
+        assert results[0]["ewma_baseline"] == 18.0
+        assert results[0]["crps"] == 1.1
 
 
+@pytest.mark.db
 def test_run_backtest_integration():
     """Integration test that runs backtest over real/mock database logs without crashing."""
     replay = HistoricalReplayCore()

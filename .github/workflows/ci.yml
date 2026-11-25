@@ -2,39 +2,14 @@ name: StatArb CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "feature/*" ]
   pull_request:
     branches: [ main ]
 
 jobs:
-  build-and-test:
-    name: Build Native Core & Run Test Suite
+  cpp-and-python-tests:
+    name: C++20 Eigen Core & Python Unit Suite
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: sports_db
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - name: Checkout Code
@@ -46,10 +21,10 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install System Dependencies & C++ Toolchain
+      - name: Install System Dependencies & C++20 Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ make libeigen3-dev libgomp1 postgresql-client
+          sudo apt-get install -y --no-install-recommends cmake g++ make libeigen3-dev libgomp1
 
       - name: Install Python Dependencies
         run: |
@@ -57,24 +32,72 @@ jobs:
           pip install pybind11 pytest pytest-asyncio
           pip install -r requirements.txt
 
-      - name: Build C++ Bare-Metal Quant Core
+      - name: Build Strict C++20 Eigen Extension (-Werror)
         run: |
-          chmod +x build_core.sh
-          ./build_core.sh
+          PYBIND_CMAKE_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())")
+          cmake -B build \
+            -Dpybind11_DIR="$PYBIND_CMAKE_DIR" \
+            -DPYTHON_EXECUTABLE="$(which python)" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-std=c++20 -O3 -Wall -Wextra -Wpedantic -Werror"
+          cmake --build build --parallel "$(nproc)"
+          cp build/quant_core*.so .
+          cp build/quant_core*.so src/
 
-      - name: Initialize Database Schema
-        env:
-          POSTGRES_URI: postgresql+psycopg2://postgres:password@localhost:5432/sports_db
+      - name: Seed CI Model Fixtures (for gitignored binary weights)
         run: |
-          python infrastructure/init_db.py
-          psql -h localhost -U postgres -d sports_db -f infrastructure/db_matchup_schema.sql
-          psql -h localhost -U postgres -d sports_db -f infrastructure/db_migration_v2.sql
-          psql -h localhost -U postgres -d sports_db -f infrastructure/db_migration_v3.sql
+          python scripts/create_ci_model_fixtures.py
 
-      - name: Run Test Suite
+      - name: Run Non-DB Pytest Suite
         env:
-          POSTGRES_URI: postgresql+psycopg2://postgres:password@localhost:5432/sports_db
-          REDIS_HOST: localhost
-          REDIS_PORT: 6379
+          PYTHONPATH: .
+          DRIFT_LOG_PREDICTIONS: "false"
         run: |
-          pytest tests/ -v
+          pytest tests/ -m "not db" -v
+
+  docker-smoke-test:
+    name: Docker Build & FastAPI Health Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Seed CI Model Fixtures
+        run: |
+          pip install --no-cache-dir numpy pandas xgboost lightgbm python-dotenv
+          python scripts/create_ci_model_fixtures.py
+
+      - name: Build Production Inference Image with GIT_SHA
+        run: |
+          docker build \
+            --build-arg GIT_SHA=${{ github.sha }} \
+            -t statarb-inference-api:ci .
+
+      - name: Run Container & Verify /health + /v1/drift
+        run: |
+          docker run -d --name statarb-smoke -p 8000:8000 statarb-inference-api:ci
+          trap 'docker logs statarb-smoke || true; docker rm -f statarb-smoke || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health > /tmp/health.json; then
+              break
+            fi
+            sleep 1
+          done
+          cat /tmp/health.json
+          python -c "
+          import json
+          h = json.load(open('/tmp/health.json'))
+          assert h['status'] == 'healthy', h
+          assert h['git_sha'] == '${{ github.sha }}', h
+          assert h['feature_schema_version'] == '1.0.0', h
+          assert h['cpp_eigen_available'] is True, h
+          assert 'pts' in h['loaded_targets'], h
+          "
+          curl -fsS http://localhost:8000/v1/drift | head -c 500

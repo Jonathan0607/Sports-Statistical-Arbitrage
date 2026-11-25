@@ -32,3 +32,27 @@ All notable production architecture, runtime, serving, and build changes are doc
   - Built multi-stage Linux Docker images compiling C++20 `quant_core` under GCC 14.2.0 strict `-Werror` flags in `builder` and serving `uvicorn src.serving.app:app` in slim Python 3.11 runtime with `/health` healthcheck.
   - Resolved Linux container dependency incompatibilities in `requirements.txt` (`starlette==1.10.0` for `fastapi==0.165.0`, and `lifelines==0.30.3` for `scipy==1.17.1` compatibility after `scipy.integrate.trapz` removal).
   - Verified live container stack (`docker compose up -d --no-deps redis inference-api`) via HTTP `200` smoke tests against `GET /health` (`redis_connected: true`, `cpp_eigen_available: true`, `feature_schema_version: "1.0.0"`), `POST /v1/predict` (`23.26 ms`), and `POST /v1/allocate` (`cpp_eigen_colpiv_qr`, `1.72 ms`), followed by clean `docker compose down`.
+
+---
+
+## [2026-11-25] Phase 2: Drift Circuit Breaker, Model Registry, Test Suite Repair & CI/CD
+
+### Added
+- **Rolling Calibration & Covariate Drift Harness (`src/drift_monitor.py`):**
+  - Unified SQLAlchemy telemetry store (`prediction_telemetry` supporting SQLite in-memory/file WAL and PostgreSQL) recording `prediction_id`, `timestamp`, `model_version`, `feature_schema_version`, `player_id`, `stat_key`, `predicted_mean`, `ewma_baseline`, `predicted_prob`, `line`, `feature_snapshot_json`, and nullable `realized_value` / `realized_hit` updated via `record_settlement()`.
+  - Rolling-window calibration evaluator computing 10-bin **Expected Calibration Error (`compute_ece`)**, **Brier Score**, **Log-Loss**, and **Meta MAE vs. EWMA MAE** delta alongside **Population Stability Index (`compute_psi`)** and two-sample **Kolmogorov-Smirnov p-values** (`scipy.stats.ks_2samp`) against `models/registry/reference_stats.json` (generated from `55,055` clean Fold 2 training rows).
+  - Automated `DriftThresholds` circuit breaker emitting `HEALTHY`, `WARN_RETRAIN`, or `CIRCUIT_BREAK_FALLBACK_EWMA`, with optional Discord webhook alerts and CLI inspection.
+- **Champion/Challenger Model Registry (`src/model_registry.py`, `models/registry/`):**
+  - JSON-backed release management under `models/registry/` (`registry.json`, `champion.json`, `releases/<version_id>.json`) tracking `vYYYY.MM.DD-<short_sha>`, `git_sha`, `feature_schema_version`, `train_seasons`, `training_samples`, per-stat SHA-256 checksums across all 28 artifacts, and benchmark metrics (`overall_mae`, `overall_crps`, `ewma_mae`).
+  - Implemented `promote_challenger()` promotion gates (schema compatibility, SHA-256 integrity, baseline `ewma_mae` clearance, and incumbent champion comparison) plus atomic `rollback_to_previous()` using temp-file + `os.replace`.
+  - Registered clean Phase 1 `models/wf_fold2` artifacts as initial champion release `v2026.11.25-4c884cd`.
+- **CI/CD Workflow & Synthetic Test Fixture Seeding (`.github/workflows/ci.yml`, `scripts/create_ci_model_fixtures.py`, `pytest.ini`):**
+  - Upgraded GitHub Actions pipeline with `cpp-and-python-tests` (C++20 `-Wall -Wextra -Wpedantic -Werror` Eigen build + `pytest -m "not db"`) and `docker-smoke-test` (`--build-arg GIT_SHA=${{ github.sha }}` container verification on `/health` and `/v1/drift`).
+  - Added `pytest.ini` registering `@pytest.mark.db` and `tests/test_drift_and_registry.py` validating calibration metrics, drift circuit breaker escalation, FastAPI EWMA fallback, registry promotion gates, and atomic rollback.
+
+### Changed
+- **Serving & Container Governance Wiring (`src/serving/app.py`, `src/serving/predictor.py`, `src/serving/schemas.py`, `Dockerfile`):**
+  - Exposed `GET /v1/drift` (`DriftReportResponse`), added `drift_status`, `fallback_active`, and `registry_champion_id` to `GET /health`, enabled prediction telemetry logging, wired automatic EWMA fallback in `predict_batch()` when `fallback_active` trips, resolved default `model_version` from `models/registry/champion.json`, and added `ARG GIT_SHA=unknown` / `ENV GIT_SHA=${GIT_SHA}` to `Dockerfile`.
+- **Legacy Suite & SHAP Categorical Repair (`src/shap_analyzer.py`, `tests/`):**
+  - Updated `src/shap_analyzer.py` to compute exact native XGBoost TreeSHAP (`pred_contribs=True` on `xgb.DMatrix(..., enable_categorical=True)`) and encode categorical axes for Beeswarm plotting.
+  - Updated stale unit tests in `tests/test_shap_analyzer.py`, `tests/test_historical_replay.py` (marking live-Postgres integration test `@pytest.mark.db`), `tests/test_smart_cache_and_discord_handler.py`, `tests/test_src_dashboard.py`, and `tests/test_walk_forward.py` to match current production contracts.

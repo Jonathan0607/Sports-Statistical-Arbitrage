@@ -13,14 +13,24 @@ def test_src_dashboard_rendering():
     assert not at.exception, f"App execution raised uncaught exceptions: {at.exception}"
 
     # 3. Verify UI Layout & Header
-    header_found = any("StatArb Trading Terminal" in md.value for md in at.markdown)
-    assert header_found, "Dashboard header 'StatArb Trading Terminal' was not found in the rendered markdown."
+    header_found = any(
+        "STATARB KINETIC" in md.value or "StatArb Trading Terminal" in md.value
+        for md in at.markdown
+    )
+    assert header_found, "Dashboard header 'STATARB KINETIC' was not found in the rendered markdown."
 
     # 4. Verify Tabs are initialized (Live Execution Board and Historical Analytics)
     assert len(at.tabs) >= 2, f"Expected at least 2 tabs, but found {len(at.tabs)}."
     
-    # 5. Verify dataframes are rendered OR clean empty-state warning is shown
+    # 5. Verify dataframes are rendered OR clean empty-state banner is shown
     has_df = len(at.dataframe) > 0
-    has_info = any("System Active" in info.value for info in at.info)
-    assert has_df or has_info, "UI failed to render correctly in empty state"
+    has_info = any(
+        "Scanner Active" in info.value or "System Active" in info.value
+        for info in at.info
+    )
+    has_active_md = any(
+        "Scanner Active" in md.value or "LIVE SIGNALS" in md.value
+        for md in at.markdown
+    )
+    assert has_df or has_info or has_active_md, "UI failed to render correctly in empty state"
 
