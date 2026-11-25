@@ -46,7 +46,7 @@ jobs:
 
       - name: Seed CI Model Fixtures (for gitignored binary weights)
         run: |
-          python scripts/create_ci_model_fixtures.py
+          python scripts/create_ci_model_fixtures.py --seed-ci-registry
 
       - name: Run Non-DB Pytest Suite
         env:
@@ -71,8 +71,8 @@ jobs:
 
       - name: Seed CI Model Fixtures
         run: |
-          pip install --no-cache-dir numpy pandas xgboost lightgbm python-dotenv
-          python scripts/create_ci_model_fixtures.py
+          pip install --no-cache-dir numpy pandas xgboost lightgbm
+          python scripts/create_ci_model_fixtures.py --seed-ci-registry
 
       - name: Build Production Inference Image with GIT_SHA
         run: |

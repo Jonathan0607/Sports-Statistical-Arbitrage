@@ -1,0 +1,17 @@
+.git/
+venv/
+pgdata/
+build/
+CMakeFiles/
+logs/
+*.sqlite
+*.db
+*.log
+*.so
+*.dylib
+**/__pycache__/
+*.pyc
+models/wf_fold1/
+models/wnba_wf_fold*/
+sandbox/
+sandbox_models/

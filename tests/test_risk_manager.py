@@ -1,12 +1,89 @@
-import pytest
 import json
-from src.execution import GlobalExposureTracker, SlipQueueManager
+from collections import defaultdict
+from unittest.mock import patch
+
+import pytest
+
 from infrastructure.entity_resolver import clean_player_name
-from infrastructure.redis_client import RedisClient
+from src.execution import GlobalExposureTracker, SlipQueueManager
+
+
+class _InMemoryPipeline:
+    def __init__(self, client):
+        self._client = client
+        self._ops = []
+
+    def get(self, key):
+        self._ops.append(("get", (key,)))
+        return self
+
+    def incrbyfloat(self, key, amount):
+        self._ops.append(("incrbyfloat", (key, amount)))
+        return self
+
+    def expire(self, key, ttl):
+        self._ops.append(("expire", (key, ttl)))
+        return self
+
+    def execute(self):
+        out = []
+        for fn, args in self._ops:
+            out.append(getattr(self._client, fn)(*args))
+        self._ops.clear()
+        return out
+
+
+class _InMemoryRedis:
+    """Thread-safe minimal Redis stub so unit tests require no live Redis server."""
+
+    def __init__(self):
+        self.kv = {}
+        self.lists = defaultdict(list)
+
+    def pipeline(self):
+        return _InMemoryPipeline(self)
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def incrbyfloat(self, key, amount):
+        val = float(self.kv.get(key, 0.0)) + float(amount)
+        self.kv[key] = str(val)
+        return val
+
+    def expire(self, key, ttl):
+        return key in self.kv
+
+    def delete(self, *keys):
+        removed = 0
+        for k in keys:
+            if k in self.kv:
+                del self.kv[k]
+                removed += 1
+            if k in self.lists:
+                del self.lists[k]
+                removed += 1
+        return removed
+
+    def lpush(self, key, value):
+        self.lists[key].insert(0, value)
+        return len(self.lists[key])
+
+    def llen(self, key):
+        return len(self.lists[key])
+
+    def rpop(self, key):
+        if not self.lists[key]:
+            return None
+        return self.lists[key].pop()
+
 
 @pytest.fixture
 def redis_conn():
-    return RedisClient().get_client()
+    fake = _InMemoryRedis()
+    with patch("src.execution.RedisClient") as mock_cls:
+        mock_cls.return_value.get_client.return_value = fake
+        yield fake
 
 def test_clean_player_name():
     assert clean_player_name("Luka Dončić") == "lukadoncic"
