@@ -192,12 +192,15 @@ class SharpLineProvider:
     # API FETCH + DEVIG
     # ══════════════════════════════════════════════════════════
 
-    async def fetch_sharp_lines(self, api_key: str = None, sport: str = "basketball_nba") -> dict:
+    async def fetch_sharp_lines(self, api_key: str = None, sports: list = None) -> dict:
         """
         Fetches player prop lines from ParlayAPI for Pinnacle and DraftKings.
         Devigs Pinnacle odds using Shin's method.
         Returns {player_name: {stat_type: {line: {pinnacle_true_prob, pinnacle_line, dk_line}}}}.
         """
+        if sports is None:
+            sports = ["basketball_nba", "basketball_wnba"]
+            
         # Determine keys to try
         if api_key is not None:
             keys_to_try = [api_key]
@@ -208,7 +211,6 @@ class SharpLineProvider:
             logger.critical("No ParlayAPI keys resolved/provided. Returning empty sharp lines.")
             return {}
 
-        url = f"{PARLAY_API_BASE}/sports/{sport}/props"
         params = {
             "bookmakers": "pinnacle,draftkings",
             "markets": "player_points,player_rebounds,player_assists",
@@ -219,11 +221,43 @@ class SharpLineProvider:
                 try:
                     logger.info(f"Attempting to refresh sharp lines using API Key #{idx}...")
                     headers = {"x-api-key": key}
-                    resp = await client.get(url, headers=headers, params=params)
+                    combined_data = []
+                    success = True
+                    
+                    for sport in sports:
+                        url = f"{PARLAY_API_BASE}/sports/{sport}/props"
+                        resp = await client.get(url, headers=headers, params=params)
 
-                    if resp.status_code == 200:
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if isinstance(data, list):
+                                combined_data.extend(data)
+                            elif isinstance(data, dict):
+                                combined_data.extend(data.get("data", []))
+                        elif resp.status_code == 403:
+                            try:
+                                resp_json = resp.json()
+                                error_msg = resp_json.get("detail", {}).get("message", "")
+                            except Exception:
+                                error_msg = resp.text
+
+                            if "Credit limit exceeded" in error_msg:
+                                logger.warning(f"⚠️ API Key #{idx} exhausted (Credit limit exceeded). Attempting failover...")
+                            else:
+                                logger.warning(f"⚠️ API Key #{idx} returned 403 Forbidden: {error_msg}. Attempting failover...")
+                            success = False
+                            break
+                        elif resp.status_code == 429:
+                            logger.warning(f"⚠️ API Key #{idx} rate limited (HTTP 429). Attempting failover...")
+                            success = False
+                            break
+                        else:
+                            logger.error(f"Unexpected API response from Key #{idx}: {resp.status_code}")
+                            success = False
+                            break
+
+                    if success:
                         logger.info(f"Successfully refreshed sharp lines using API Key #{idx}.")
-                        data = resp.json()
                         if api_key is None:
                             self.last_successful_key_index = idx - 1
                         else:
@@ -231,37 +265,8 @@ class SharpLineProvider:
                                 self.last_successful_key_index = self.api_keys.index(key)
                             except ValueError:
                                 self.last_successful_key_index = 0
-                        return self._parse_and_devig(data)
-
-                    elif resp.status_code == 403:
-                        try:
-                            resp_json = resp.json()
-                            error_msg = resp_json.get("detail", {}).get("message", "")
-                        except Exception:
-                            error_msg = resp.text
-
-                        if "Credit limit exceeded" in error_msg:
-                            logger.warning(
-                                f"⚠️ API Key #{idx} exhausted (Credit limit exceeded). "
-                                f"Attempting failover to next available key..."
-                            )
-                            continue  # Try next key
-                        else:
-                            logger.warning(
-                                f"⚠️ API Key #{idx} returned 403 Forbidden: {error_msg}. "
-                                f"Attempting failover to next available key..."
-                            )
-                            continue
-
-                    elif resp.status_code == 429:
-                        logger.warning(
-                            f"⚠️ API Key #{idx} rate limited (HTTP 429). "
-                            f"Attempting failover to next available key..."
-                        )
-                        continue
-
+                        return self._parse_and_devig(combined_data)
                     else:
-                        logger.error(f"Unexpected API response from Key #{idx}: {resp.status_code}")
                         continue
 
                 except Exception as e:
@@ -485,17 +490,19 @@ class SharpLineProvider:
     # SYNCHRONOUS FORCE SEED
     # ══════════════════════════════════════════════════════════
 
-    def force_sync_seed(self) -> dict:
+    def force_sync_seed(self, sports: list = None) -> dict:
         """
         Forces an immediate synchronous API call to ParlayAPI to seed the cache.
         Returns parsed/devigged lines, and saves them to sharp_cache.json.
         """
+        if sports is None:
+            sports = ["basketball_nba", "basketball_wnba"]
+            
         keys_to_try = self.api_keys
         if not keys_to_try:
             logger.critical("No ParlayAPI keys available. Cannot force seed sharp cache.")
             return {}
 
-        url = f"{PARLAY_API_BASE}/sports/basketball_nba/props"
         params = {
             "bookmakers": "pinnacle,draftkings",
             "markets": "player_points,player_rebounds,player_assists",
@@ -506,45 +513,48 @@ class SharpLineProvider:
                 try:
                     logger.info(f"Forcing synchronous ParlayAPI call using API Key #{idx}...")
                     headers = {"x-api-key": key}
-                    resp = client.get(url, headers=headers, params=params)
+                    combined_data = []
+                    success = True
+                    
+                    for sport in sports:
+                        url = f"{PARLAY_API_BASE}/sports/{sport}/props"
+                        resp = client.get(url, headers=headers, params=params)
 
-                    if resp.status_code == 200:
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if isinstance(data, list):
+                                combined_data.extend(data)
+                            elif isinstance(data, dict):
+                                combined_data.extend(data.get("data", []))
+                        elif resp.status_code == 403:
+                            try:
+                                resp_json = resp.json()
+                                error_msg = resp_json.get("detail", {}).get("message", "")
+                            except Exception:
+                                error_msg = resp.text
+
+                            if "Credit limit exceeded" in error_msg:
+                                logger.warning(f"⚠️ Sync API Key #{idx} exhausted (Credit limit exceeded). Attempting failover...")
+                            else:
+                                logger.warning(f"⚠️ Sync API Key #{idx} returned 403 Forbidden: {error_msg}. Attempting failover...")
+                            success = False
+                            break
+                        elif resp.status_code == 429:
+                            logger.warning(f"⚠️ Sync API Key #{idx} rate limited (HTTP 429). Attempting failover...")
+                            success = False
+                            break
+                        else:
+                            logger.error(f"Unexpected sync API response from Key #{idx}: {resp.status_code}")
+                            success = False
+                            break
+
+                    if success:
                         logger.info(f"Successfully force-seeded sharp cache using API Key #{idx}.")
-                        raw_data = resp.json()
-                        lines = self._parse_and_devig(raw_data)
+                        lines = self._parse_and_devig(combined_data)
                         call_count = self._get_monthly_call_count()
                         self.save_cache(lines, call_count + 1, idx - 1)
                         return lines
-
-                    elif resp.status_code == 403:
-                        try:
-                            resp_json = resp.json()
-                            error_msg = resp_json.get("detail", {}).get("message", "")
-                        except Exception:
-                            error_msg = resp.text
-
-                        if "Credit limit exceeded" in error_msg:
-                            logger.warning(
-                                f"⚠️ Sync API Key #{idx} exhausted (Credit limit exceeded). "
-                                f"Attempting failover to next available key..."
-                            )
-                            continue
-                        else:
-                            logger.warning(
-                                f"⚠️ Sync API Key #{idx} returned 403 Forbidden: {error_msg}. "
-                                f"Attempting failover to next available key..."
-                            )
-                            continue
-
-                    elif resp.status_code == 429:
-                        logger.warning(
-                            f"⚠️ Sync API Key #{idx} rate limited (HTTP 429). "
-                            f"Attempting failover to next available key..."
-                        )
-                        continue
-
                     else:
-                        logger.error(f"Unexpected sync API response from Key #{idx}: {resp.status_code}")
                         continue
 
                 except Exception as e:

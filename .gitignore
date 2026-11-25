@@ -10,8 +10,10 @@ __pycache__/
 
 # C++ Build Artifacts
 build/
+CMakeFiles/
 *.so
 *.dylib
+
 
 # Dynamic Caches & Logs
 logs/*
@@ -27,3 +29,9 @@ models/wf_fold*/*
 
 # OS Files
 .DS_Store
+
+# Raw Postgres binaries & local databases/logs
+pgdata/
+*.log
+*.sqlite
+*.db

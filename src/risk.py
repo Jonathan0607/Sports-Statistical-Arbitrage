@@ -6,6 +6,7 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from src.config import LEAGUE_CONFIG
 load_dotenv()
 
 # Try to import C++ quant_core extension for high-performance Kelly optimization
@@ -57,6 +58,11 @@ class RiskManager:
         if n == 0:
             return np.array([])
 
+        # Covariance Matrix Shrinkage (Ledoit-Wolf / Risk Mitigation)
+        delta = 0.20
+        shrunk_cov = (1 - delta) * cov + delta * (np.trace(cov) / n) * np.eye(n)
+        cov = shrunk_cov
+
         # --- C++ Eigen Fast Path ---
         if _HAS_CPP_KELLY:
             try:
@@ -91,16 +97,21 @@ class RiskManager:
         return f
 
     @staticmethod
-    def mask_bet_size(raw_kelly_dollar_amount: float) -> int:
+    def mask_bet_size(raw_kelly_dollar_amount: float, league: str = "NBA") -> int:
         """
         Rounds raw_kelly_dollar_amount to the nearest recreational multiple ($5 increment).
         If under $5, returns $5.
+        Capped dynamically at LEAGUE_CONFIG[league]["max_retail_bet_limit"].
         """
-        if raw_kelly_dollar_amount < 5.0:
-            return 5
+        league_key = league.upper() if league else "NBA"
+        max_limit = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["max_retail_bet_limit"]
+        capped_amount = min(float(raw_kelly_dollar_amount), float(max_limit))
+        if capped_amount < 5.0:
+            return min(5, int(max_limit))
         # Round to nearest $5
-        rounded = int(round(raw_kelly_dollar_amount / 5.0) * 5)
-        return max(5, rounded)
+        rounded = int(round(capped_amount / 5.0) * 5)
+        rounded = min(rounded, int(max_limit))
+        return max(5, rounded) if max_limit >= 5 else int(max_limit)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

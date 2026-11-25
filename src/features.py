@@ -3,11 +3,26 @@ import logging
 import pandas as pd
 import numpy as np
 import sqlalchemy
+from src.config import LEAGUE_CONFIG
+from src.feature_contract import (
+    FEATURE_SCHEMA_VERSION,
+    FEATURE_COLUMNS,
+    WNBA_FEATURE_COLUMNS,
+    PLAYER_TIERS,
+    TIER_ORDER,
+    assign_player_tier,
+    get_tier_alpha,
+    compute_causal_player_features,
+    compute_target_rolling_features,
+    build_online_feature_row,
+)
 
 logger = logging.getLogger("ContextualFeatureEngine")
 
 class ContextualFeatureEngine:
-    def __init__(self, db_uri: str = None):
+    def __init__(self, db_uri: str = None, league: str = "NBA"):
+        self.league = league.upper() if league else "NBA"
+        self.regulation_minutes = LEAGUE_CONFIG.get(self.league, LEAGUE_CONFIG["NBA"])["regulation_minutes"]
         self.db_uri = db_uri or os.getenv("POSTGRES_URI", "postgresql+psycopg2://postgres:password@localhost:5432/sports_db")
         if self.db_uri.startswith("postgres://"):
             self.db_uri = self.db_uri.replace("postgres://", "postgresql+psycopg2://", 1)
@@ -34,25 +49,74 @@ class ContextualFeatureEngine:
             pos = "SG"
         return team_id, pos
 
-    def get_co_stars(self, team_id: int, exclude_player_id: str = None) -> list:
+    def get_co_stars(self, team_id: int, exclude_player_id: str = None, target_date: str = None) -> list:
         """
-        Retrieves co-stars for a team.
-        Co-stars are teammates (same team_id) with average minutes > 25 and usage > 25%.
-        Returns a list of dicts containing player_id and their historical avg_usg.
+        Retrieves co-stars for a team strictly point-in-time up to target_date (when provided).
+        Resolves each player's active team strictly from historical game logs prior to target_date
+        rather than mutable players.current_team_id so mid-season trades never leak future rosters.
+        Co-stars are active teammates on team_id with average minutes > 25 and usage > 25%.
         """
         if not team_id:
             return []
-        query = """
-            SELECT g.player_id, AVG(g.minutes_played) as avg_min, AVG(g.usage_rate) as avg_usg
-            FROM player_game_logs g
-            JOIN players p ON g.player_id = p.master_player_id
-            WHERE p.current_team_id = :team_id
+        date_clause = "AND gm.start_time < :target_date" if target_date is not None else ""
+        query = f"""
+            WITH candidate_players AS (
+                SELECT DISTINCT g.player_id
+                FROM player_game_logs g
+                JOIN games gm ON g.game_id = gm.game_id
+                WHERE (gm.home_team_id = :team_id OR gm.away_team_id = :team_id)
+                  {date_clause}
+            ),
+            recent_games AS (
+                SELECT g.player_id, gm.home_team_id, gm.away_team_id, gm.start_time,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY g.player_id
+                           ORDER BY gm.start_time DESC, g.game_id DESC
+                       ) AS rn
+                FROM player_game_logs g
+                JOIN games gm ON g.game_id = gm.game_id
+                JOIN candidate_players cp ON g.player_id = cp.player_id
+                WHERE 1=1
+                  {date_clause}
+            ),
+            exploded AS (
+                SELECT player_id, home_team_id AS cand_team, start_time, rn
+                FROM recent_games
+                WHERE rn <= 5
+                UNION ALL
+                SELECT player_id, away_team_id AS cand_team, start_time, rn
+                FROM recent_games
+                WHERE rn <= 5
+            ),
+            team_ranked AS (
+                SELECT player_id, cand_team,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY player_id
+                           ORDER BY COUNT(*) DESC, MIN(rn) ASC, MAX(start_time) DESC
+                       ) AS team_rank
+                FROM exploded
+                GROUP BY player_id, cand_team
+            ),
+            player_team_as_of AS (
+                SELECT player_id
+                FROM team_ranked
+                WHERE team_rank = 1 AND cand_team = :team_id
+            )
+            SELECT g.player_id, AVG(g.minutes_played) AS avg_min, AVG(g.usage_rate) AS avg_usg
+            FROM player_team_as_of pt
+            JOIN player_game_logs g ON g.player_id = pt.player_id
+            JOIN games gm ON g.game_id = gm.game_id
+            WHERE 1=1
+              {date_clause}
             GROUP BY g.player_id
             HAVING AVG(g.minutes_played) > 25.0 AND AVG(g.usage_rate) > 0.25;
         """
+        params = {"team_id": int(team_id)}
+        if target_date is not None:
+            params["target_date"] = target_date
         try:
             with self.engine.connect() as conn:
-                res = conn.execute(sqlalchemy.text(query), {"team_id": team_id}).fetchall()
+                res = conn.execute(sqlalchemy.text(query), params).fetchall()
             costars = [
                 {"player_id": str(row[0]), "avg_usg": float(row[2])}
                 for row in res
@@ -99,7 +163,10 @@ class ContextualFeatureEngine:
             vacated_usg = 0.0
             for costar_id, costar_usg in co_star_map.items():
                 mins = played_players.get(costar_id, 0.0)
-                if mins < 5.0:
+                # Strict DNP (0.0 minutes / absent from game): using mins < 5.0 would leak
+                # intra-game early injuries/ejections that are unknowable pre-game.
+                # Assumes historical DNP status serves as a proxy for pre-game ruled-out reports.
+                if mins == 0.0:
                     vacated_usg += costar_usg
             return float(vacated_usg)
         except Exception as e:
@@ -188,20 +255,42 @@ class ContextualFeatureEngine:
             df['season'] = df['start_time'].apply(infer_season)
 
         team_id, position = self.get_player_team_and_pos(player_id)
-        if not team_id:
-            if not df.empty and 'home_team_id' in df.columns:
-                team_id = int(df.iloc[0]['home_team_id'])
+        if 'team_id' not in df.columns or df['team_id'].isna().all():
+            if 'home_team_id' in df.columns and 'away_team_id' in df.columns and len(df) >= 2:
+                # Infer each game's team causally from pre-game schedule pairs {home, away} across recent history
+                inferred_teams = []
+                homes = df['home_team_id'].astype(int).tolist()
+                aways = df['away_team_id'].astype(int).tolist()
+                for i in range(len(df)):
+                    h_i, a_i = homes[i], aways[i]
+                    win_start = max(0, i - 4)
+                    win_end = min(len(df), i + 2) if i == 0 else i + 1
+                    counts = {h_i: 0, a_i: 0}
+                    for j in range(win_start, win_end):
+                        if homes[j] in counts:
+                            counts[homes[j]] += 1
+                        if aways[j] in counts:
+                            counts[aways[j]] += 1
+                    inferred_teams.append(h_i if counts[h_i] >= counts[a_i] else a_i)
+                df['team_id'] = inferred_teams
+                team_id = int(inferred_teams[-1])
             else:
-                team_id = 0
-                
-        df['team_id'] = team_id
+                if not team_id:
+                    team_id = int(df.iloc[0]['home_team_id']) if (not df.empty and 'home_team_id' in df.columns) else 0
+                df['team_id'] = team_id
+        else:
+            fallback_tid = int(team_id) if team_id else (int(df['home_team_id'].iloc[0]) if (not df.empty and 'home_team_id' in df.columns) else 0)
+            df['team_id'] = pd.to_numeric(df['team_id'], errors='coerce').fillna(fallback_tid).astype(int)
+            if not df.empty:
+                team_id = int(df['team_id'].iloc[-1])
         df['player_id'] = player_id
 
         # 1. Rest & Back-to-Back features (reset at season boundaries to prevent summer bleedover)
-        if 'home_team_id' in df.columns:
-            df['is_home_game'] = (df['home_team_id'].astype(float) == float(team_id)).astype(float)
-        else:
-            df['is_home_game'] = 0.0
+        if 'is_home_game' not in df.columns or df['is_home_game'].isna().all():
+            if 'home_team_id' in df.columns:
+                df['is_home_game'] = (df['home_team_id'].astype(float) == df['team_id'].astype(float)).astype(float)
+            else:
+                df['is_home_game'] = 0.0
 
         days_rest_list = []
         is_b2b_list = []
@@ -214,16 +303,19 @@ class ContextualFeatureEngine:
             days_rest_list.append(float(days_rest))
             is_b2b_list.append(1.0 if days_rest == 1 else 0.0)
 
-        df['days_rest'] = days_rest_list
-        df['is_back_to_back'] = is_b2b_list
+        if 'days_rest' not in df.columns or df['days_rest'].isna().all():
+            df['days_rest'] = days_rest_list
+        if 'is_back_to_back' not in df.columns or df['is_back_to_back'].isna().all():
+            df['is_back_to_back'] = is_b2b_list
 
         # 2. Opponent-based features (Bulk query team_matchup_metrics)
         game_ids = df['game_id'].tolist()
-        df['opponent_team_id'] = df.apply(
-            lambda r: int(r['away_team_id']) if int(r['home_team_id']) == team_id else int(r['home_team_id']),
-            axis=1
-        )
-        
+        if 'opponent_team_id' not in df.columns or df['opponent_team_id'].isna().all():
+            df['opponent_team_id'] = df.apply(
+                lambda r: int(r['away_team_id']) if int(r['home_team_id']) == int(r['team_id']) else int(r['home_team_id']),
+                axis=1
+            )
+
         opp_metrics = {}
         if game_ids:
             pos_col = f"points_allowed_vs_{position.lower()}"
@@ -250,42 +342,63 @@ class ContextualFeatureEngine:
             except Exception as e:
                 logger.error(f"Failed to query bulk matchup metrics: {e}")
 
-        # Map opponent metrics to df
+        # Map opponent metrics to df (preserving pre-supplied values if DB returned no match)
         opp_def_rating_list = []
         opp_pace_factor_list = []
         opp_pos_pts_allowed_list = []
         pace_differential_list = []
         fallback_pos_allowed = {"PG": 24.0, "SG": 22.0, "SF": 21.0, "PF": 22.0, "C": 23.0}
 
+        has_opp_def = 'opp_def_rating' in df.columns
+        has_opp_pace = 'opp_pace_factor' in df.columns
+        has_opp_pos = 'opp_pos_pts_allowed' in df.columns
+        has_pace_diff = 'pace_differential' in df.columns
+
         for _, row in df.iterrows():
             opp_id = int(row['opponent_team_id'])
+            row_team_id = int(row['team_id'])
             g_id = int(row['game_id'])
             metrics = opp_metrics.get((opp_id, g_id))
-            own_metrics = opp_metrics.get((team_id, g_id))
-            
+            own_metrics = opp_metrics.get((row_team_id, g_id))
+
             if metrics:
                 opp_def_rating_list.append(metrics["opp_def_rating"])
                 opp_pace_factor_list.append(metrics["opp_pace_factor"])
                 opp_pos_pts_allowed_list.append(metrics["opp_pos_pts_allowed"])
             else:
-                opp_def_rating_list.append(115.0)
-                opp_pace_factor_list.append(99.0)
-                opp_pos_pts_allowed_list.append(fallback_pos_allowed.get(position.upper(), 22.0))
-            
+                opp_def_rating_list.append(
+                    float(row['opp_def_rating']) if has_opp_def and pd.notna(row['opp_def_rating']) else (100.0 if self.league == 'WNBA' else 115.0)
+                )
+                opp_pace_factor_list.append(
+                    float(row['opp_pace_factor']) if has_opp_pace and pd.notna(row['opp_pace_factor']) else (80.0 if self.league == 'WNBA' else 99.0)
+                )
+                opp_pos_pts_allowed_list.append(
+                    float(row['opp_pos_pts_allowed']) if has_opp_pos and pd.notna(row['opp_pos_pts_allowed']) else fallback_pos_allowed.get(position.upper(), 22.0)
+                )
+
             if own_metrics and metrics:
                 pace_differential_list.append(own_metrics["opp_pace_factor"] - metrics["opp_pace_factor"])
             else:
-                pace_differential_list.append(0.0)
+                pace_differential_list.append(
+                    float(row['pace_differential']) if has_pace_diff and pd.notna(row['pace_differential']) else 0.0
+                )
 
         df['opp_def_rating'] = opp_def_rating_list
         df['opp_pace_factor'] = opp_pace_factor_list
         df['opp_pos_pts_allowed'] = opp_pos_pts_allowed_list
         df['pace_differential'] = pace_differential_list
 
-        # 3. Vacated usage feature (Bulk query)
-        co_stars = self.get_co_stars(team_id, exclude_player_id=player_id)
+        # 3. Vacated usage feature (Bulk query; point-in-time bounded by target_date when set)
+        effective_target_date = target_date
+        if effective_target_date is None and not df.empty and 'start_time' in df.columns:
+            effective_target_date = df['start_time'].max().isoformat()
+        try:
+            co_stars = self.get_co_stars(team_id, exclude_player_id=player_id, target_date=effective_target_date)
+        except TypeError:
+            # Backward compatibility for unit tests mocking get_co_stars with 2 positional args
+            co_stars = self.get_co_stars(team_id, exclude_player_id=player_id)
         vacated_usage_list = []
-        
+
         co_star_map = {}
         if isinstance(co_stars, dict):
             co_star_map = co_stars
@@ -312,58 +425,41 @@ class ContextualFeatureEngine:
                         "game_ids": tuple(game_ids),
                         "co_stars": tuple(co_star_ids)
                     }).fetchall()
-                
+
                 played = {}
                 for row in res:
                     g_id, p_id, mins = int(row[0]), str(row[1]), float(row[2])
                     if g_id not in played:
                         played[g_id] = {}
                     played[g_id][p_id] = mins
-                
+
                 for g_id in game_ids:
                     game_played = played.get(g_id, {})
                     vacated_usg = 0.0
                     for costar_id, costar_usg in co_star_map.items():
                         mins = game_played.get(costar_id, 0.0)
-                        if mins < 5.0:
+                        # Strict DNP (0.0 minutes / absent from game) avoids leaking
+                        # intra-game early exits/ejections; proxies pre-game ruled-out status.
+                        if mins == 0.0:
                             vacated_usg += costar_usg
                     vacated_by_game[g_id] = float(vacated_usg)
             except Exception as e:
                 logger.error(f"Failed to query teammate vacated usage: {e}")
 
+        has_vacated = 'vacated_usage' in df.columns
         for _, row in df.iterrows():
             g_id = int(row['game_id'])
-            vacated_usage_list.append(vacated_by_game.get(g_id, 0.0))
+            if g_id in vacated_by_game:
+                vacated_usage_list.append(vacated_by_game[g_id])
+            elif has_vacated and pd.notna(row['vacated_usage']):
+                vacated_usage_list.append(float(row['vacated_usage']))
+            else:
+                vacated_usage_list.append(0.0)
 
         df['vacated_usage'] = vacated_usage_list
 
-        # 4. Rolling tracking features (from player_tracking_logs) - partitioned strictly by season
-        for col, default in [('potential_assists', 0.0), ('touches', 0.0), ('passes_made', 0.0), ('time_of_possession_sec', 0.0), ('avg_defender_distance_ft', 4.5), ('shorthanded_points', 0.0), ('plus_minus', 0.0), ('field_goals_attempted', 0.0), ('free_throws_attempted', 0.0)]:
-            if col not in df.columns:
-                df[col] = default
-            else:
-                df[col] = df[col].fillna(default)
-
-        # Advanced derived columns before rolling
-        df['ts_pct'] = df['points'] / (2 * (df['field_goals_attempted'] + 0.44 * df['free_throws_attempted']) + 1e-5)
-        df['reb_rate'] = (df['rebounds'] / (df['minutes_played'] + 1e-5)) * 36.0
-        df['ast_rate'] = (df['assists'] / (df['minutes_played'] + 1e-5)) * 36.0
-        df['usg_efficiency'] = df['points'] / ((df['usage_rate'] * df['minutes_played']) + 1e-5)
-
-        df['roll_potential_assists'] = df.groupby('season')['potential_assists'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_touches'] = df.groupby('season')['touches'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_passes_made'] = df.groupby('season')['passes_made'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_time_of_possession_sec'] = df.groupby('season')['time_of_possession_sec'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_defender_distance'] = df.groupby('season')['avg_defender_distance_ft'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(4.5)
-        df['roll_shorthanded_points'] = df.groupby('season')['shorthanded_points'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_plus_minus'] = df.groupby('season')['plus_minus'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        
-        df['roll_ts_pct'] = df.groupby('season')['ts_pct'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_reb_rate'] = df.groupby('season')['reb_rate'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_ast_rate'] = df.groupby('season')['ast_rate'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-        df['roll_usg_efficiency'] = df.groupby('season')['usg_efficiency'].transform(lambda s: s.shift(1).ewm(alpha=0.3, adjust=False).mean()).fillna(0.0)
-
-        return df
+        # 4. Shared strictly point-in-time causal rolling & tier features
+        return compute_causal_player_features(df, league=self.league)
 
     def build_active_features(self, player_id: str, active_polled_player_ids: list = None, target_date: str = None) -> dict:
         """
@@ -431,6 +527,7 @@ class ContextualFeatureEngine:
         is_b2b = 1.0 if days_rest == 1 else 0.0
 
         # 2. Opponent metrics
+        opp_id = 0
         if game_row:
             opp_id = int(game_row[2]) if int(game_row[1]) == team_id else int(game_row[1])
             pos_col = f"points_allowed_vs_{position.lower()}"
@@ -458,8 +555,8 @@ class ContextualFeatureEngine:
                     opp_pace = float(metric_row[1])
                     opp_pos_pts = float(metric_row[2])
                 else:
-                    opp_def = 115.0
-                    opp_pace = 99.0
+                    opp_def = 100.0 if self.league == 'WNBA' else 115.0
+                    opp_pace = 80.0 if self.league == 'WNBA' else 99.0
                     fallback_pos_allowed = {"PG": 24.0, "SG": 22.0, "SF": 21.0, "PF": 22.0, "C": 23.0}
                     opp_pos_pts = fallback_pos_allowed.get(position.upper(), 22.0)
                     
@@ -470,20 +567,23 @@ class ContextualFeatureEngine:
                     
             except Exception as e:
                 logger.error(f"Error querying active matchup metrics: {e}")
-                opp_def = 115.0
-                opp_pace = 99.0
+                opp_def = 100.0 if self.league == 'WNBA' else 115.0
+                opp_pace = 80.0 if self.league == 'WNBA' else 99.0
                 opp_pos_pts = 22.0
                 pace_diff = 0.0
         else:
-            opp_def = 115.0
-            opp_pace = 99.0
+            opp_def = 100.0 if self.league == 'WNBA' else 115.0
+            opp_pace = 80.0 if self.league == 'WNBA' else 99.0
             opp_pos_pts = 22.0
             pace_diff = 0.0
             
         is_home_game = 1.0 if game_row and int(game_row[1]) == team_id else 0.0
 
-        # 3. Vacated usage for upcoming game
-        co_stars = self.get_co_stars(team_id, exclude_player_id=player_id)
+        # 3. Vacated usage for upcoming game (point-in-time bounded by target_date)
+        try:
+            co_stars = self.get_co_stars(team_id, exclude_player_id=player_id, target_date=target_date)
+        except TypeError:
+            co_stars = self.get_co_stars(team_id, exclude_player_id=player_id)
         vacated_usage = 0.0
 
         co_star_map = {}
@@ -588,6 +688,8 @@ class ContextualFeatureEngine:
             logger.error(f"Error querying active tracking features: {e}")
 
         return {
+            "team_id": float(team_id),
+            "opponent_team_id": float(opp_id),
             "days_rest": days_rest,
             "is_back_to_back": is_b2b,
             "opp_def_rating": opp_def,

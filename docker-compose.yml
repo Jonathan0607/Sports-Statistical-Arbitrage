@@ -1,7 +1,18 @@
 services:
-  db:
+  redis:
+    image: redis/redis-stack-server:latest
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
     image: timescale/timescaledb:latest-pg16
-    restart: always
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
@@ -10,23 +21,49 @@ services:
       - "5432:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d quant_engine"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  redis:
-    image: redis/redis-stack-server:latest
-    restart: always
-    ports:
-      - "6379:6379"
-
-  statarb_engine:
+  inference-api:
     build:
       context: .
       dockerfile: Dockerfile
-    restart: always
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
     depends_on:
-      - db
-      - redis
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
-      - POSTGRES_URI=postgresql+psycopg2://postgres:password@db:5432/quant_engine
+      - MODEL_DIR=models/wf_fold2
+      - POSTGRES_URI=postgresql+psycopg2://postgres:password@postgres:5432/quant_engine
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
+  hfp-poller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      inference-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "scrapers/hfp_poller.py", "--inference-url", "http://inference-api:8000"]
+    environment:
+      - INFERENCE_URL=http://inference-api:8000
+      - POSTGRES_URI=postgresql+psycopg2://postgres:password@postgres:5432/quant_engine
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379

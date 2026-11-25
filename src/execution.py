@@ -24,6 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from infrastructure.entity_resolver import clean_player_name
 from infrastructure.redis_client import RedisClient
+from src.config import LEAGUE_CONFIG
 
 try:
     from zoneinfo import ZoneInfo
@@ -327,23 +328,36 @@ class CorrelatedSlipEvaluator:
             adjusted_rho = -baseline_rho
         else:
             adjusted_rho = baseline_rho
+
+        # Transform rho for copula covariance
+        transformed_rho = float(np.sin(np.pi / 2.0 * adjusted_rho))
             
         # 4. Perform Probability Integral Transform (PIT) continuous correction
         u = self.calculate_pit_adjusted_prob(sig1)
         v = self.calculate_pit_adjusted_prob(sig2)
         
-        # 5. Gaussian Copula calculation for Joint Probability
-        # Normal z-scores
-        z1 = norm.ppf(u)
-        z2 = norm.ppf(v)
-        
-        # Apply the sine transformation to map Kendall's Tau to Pearson's Rho for the Gaussian Copula
-        transformed_rho = np.sin(np.pi / 2.0 * adjusted_rho)
-        # Handle correlation bounds safely
-        rho_clip = np.clip(transformed_rho, -0.999, 0.999)
-        cov = [[1.0, rho_clip], [rho_clip, 1.0]]
-        
-        joint_prob = float(multivariate_normal.cdf([z1, z2], mean=[0.0, 0.0], cov=cov))
+        # 5. Dynamic Copula calculation for Joint Probability
+        if side1 == "over" and side2 == "over" and adjusted_rho > 0:
+            # Gumbel Copula for upper-tail dependence
+            tau = max(1e-5, min(adjusted_rho, 0.99))
+            theta = 1.0 / (1.0 - tau)
+            theta = max(1.0, theta)
+            u_g = -np.log(u)
+            v_g = -np.log(v)
+            joint_prob = float(np.exp(-((u_g**theta + v_g**theta)**(1.0/theta))))
+        elif side1 == "under" and side2 == "under" and adjusted_rho > 0:
+            # Clayton Copula for lower-tail dependence
+            tau = max(1e-5, min(adjusted_rho, 0.99))
+            theta = 2.0 * tau / (1.0 - tau)
+            theta = max(1e-5, theta)
+            joint_prob = float((u**(-theta) + v**(-theta) - 1.0)**(-1.0/theta))
+        else:
+            # Gaussian Copula for mixed/symmetric or negative dependence
+            z1 = norm.ppf(u)
+            z2 = norm.ppf(v)
+            rho_clip = np.clip(transformed_rho, -0.999, 0.999)
+            cov = [[1.0, rho_clip], [rho_clip, 1.0]]
+            joint_prob = float(multivariate_normal.cdf([z1, z2], mean=[0.0, 0.0], cov=cov))
         
         # 6. Calculate Independent Joint Probability
         p1_raw = float(sig1.get("prob") or sig1.get("True Prob") or sig1.get("sharp_prob") or 0.50)
@@ -361,6 +375,27 @@ class CorrelatedSlipEvaluator:
         # 8. Expected Value calculation
         # EV = (Joint Probability * Payout Multiplier) - 1.0
         ev = (joint_prob * payout_multiplier) - 1.0
+
+        # 9. Exact Analytical Binary Covariance (\Sigma)
+        # \Sigma_ii = p_i * (1 - p_i)
+        # \Sigma_ij = p_ij - (p_i * p_j)
+        var1 = u * (1.0 - u)
+        var2 = v * (1.0 - v)
+        cov_12 = joint_prob - (u * v)
+        binary_cov = np.array([
+            [var1, cov_12],
+            [cov_12, var2]
+        ])
+
+        # 10. Pass to Multivariate Kelly Optimizer
+        from src.risk import RiskManager
+        # Approximate marginal EVs for the legs (PrizePicks 2-leg pays ~1.732x per leg)
+        marginal_payout = np.sqrt(payout_multiplier)
+        ev1 = (u * marginal_payout) - 1.0
+        ev2 = (v * marginal_payout) - 1.0
+        expected_returns = np.array([ev1, ev2])
+        
+        kelly_fractions = RiskManager.multivariate_kelly(expected_returns, binary_cov)
         
         return {
             "player1": sig1.get("player") or sig1.get("Player"),
@@ -376,7 +411,9 @@ class CorrelatedSlipEvaluator:
             "independent_prob": independent_prob,
             "joint_prob": joint_prob,
             "payout_multiplier": payout_multiplier,
-            "ev": ev
+            "ev": ev,
+            "binary_cov": binary_cov.tolist(),
+            "kelly_fractions": kelly_fractions.tolist()
         }
 
 
@@ -467,15 +504,11 @@ async def run_worker():
             # 2. Group signals by Retail Book
             # PrizePicks signals will have "Book" == "PrizePicks" (or keys starting with "signal:pp:")
             pp_signals = []
-            ud_signals = []
             
             for sig in signals:
                 book = sig.get("Book") or ""
                 if "prizepicks" in book.lower() or "pp" in book.lower():
                     pp_signals.append(sig)
-                elif "underdog" in book.lower() or "ud" in book.lower():
-                    ud_signals.append(sig)
-            
             # 3. Process SGP candidates for PrizePicks
             # Note: The request focuses on the list 'execution_queue:prizepicks'
             if len(pp_signals) >= 2:
@@ -504,19 +537,29 @@ async def run_worker():
                                 f"EV: {ev * 100.0:.2f}%"
                             )
                             
-                            # Calculate Kelly Stake
-                            joint_prob = res["joint_prob"]
-                            payout_multiplier = res["payout_multiplier"]
-                            net_odds = payout_multiplier - 1.0
-                            if net_odds > 0:
-                                kelly_f = joint_prob - (1.0 - joint_prob) / net_odds
-                            else:
-                                kelly_f = 0.0
-                                
-                            kelly_fraction = max(0.0, kelly_f) * 0.25  # Quarter Kelly
-                            kelly_fraction = min(kelly_fraction, 0.05)  # Cap at 5%
+                            # Calculate Kelly Stake using Analytical Binary Covariance
+                            # evaluate_slip now computes the binary covariance matrix and routes it through
+                            # RiskManager.multivariate_kelly, returning the optimal fractions for the legs.
+                            kelly_fractions = res.get("kelly_fractions", [0.0, 0.0])
+                            # Conservatively size the parlay based on the minimum optimal allocation of its legs
+                            kelly_f = min(kelly_fractions)
+                            
+                            # The multivariate_kelly function already applied quarter-kelly scaling (0.25)
+                            kelly_fraction = min(kelly_f, 0.05)  # Cap at 5%
                             recommended_stake = kelly_fraction * 50000.0
                             
+                            # Determine league from signals
+                            league = (
+                                sig1.get("league") or sig2.get("league") or
+                                sig1.get("sport") or sig2.get("sport") or
+                                sig1.get("Sport") or sig2.get("Sport") or
+                                "NBA"
+                            ).strip().upper()
+                            if league not in LEAGUE_CONFIG:
+                                league = "NBA"
+                            max_retail_limit = LEAGUE_CONFIG[league]["max_retail_bet_limit"]
+                            recommended_stake = min(recommended_stake, max_retail_limit)
+
                             # Run exposure check & scale
                             player_names = [res["player1"], res["player2"]]
                             # Extract slate_id or game_date from signals if available
@@ -532,8 +575,12 @@ async def run_worker():
                                 redis_client.setex(dedup_key, 1800, "rejected")
                                 continue
                                 
-                            # Apply Bet Masking/Camouflage roundings
-                            masked_stake = BetMaskingEngine.mask_kelly_stake(scaled_stake)
+                            # Apply dynamic league bet limit cap
+                            scaled_stake = min(scaled_stake, max_retail_limit)
+
+                            # Apply Bet Masking/Camouflage roundings with dynamic league ceiling
+                            masked_stake = BetMaskingEngine.mask_kelly_stake(scaled_stake, league=league)
+                            masked_stake = min(masked_stake, int(max_retail_limit))
                             if masked_stake > scaled_stake:
                                 masked_stake = max(5, int(scaled_stake))
                                 
@@ -542,7 +589,7 @@ async def run_worker():
                                 continue
                                 
                             # Formulate Execution Payload
-                            payload = queue_manager.formulate_execution_payload(sig1, sig2, masked_stake, ev)
+                            payload = queue_manager.formulate_execution_payload(sig1, sig2, masked_stake, ev, league=league)
                             
                             # Commit risk exposure to Redis
                             tracker.commit_exposure(player_names, masked_stake, identifier=identifier)
@@ -665,14 +712,18 @@ class SlipQueueManager:
         self.queue_name = queue_name
         self.redis_client = RedisClient().get_client()
 
-    def formulate_execution_payload(self, leg1: dict, leg2: dict, risk_adjusted_stake: float, ev_edge: float) -> dict:
+    def formulate_execution_payload(self, leg1: dict, leg2: dict, risk_adjusted_stake: float, ev_edge: float, league: str = "NBA") -> dict:
         """
         Constructs a structured Execution Payload dictionary containing:
         - player name, stat category, side, line, and target_execution_line for each leg
-        - risk adjusted stake
+        - risk adjusted stake (capped by league limit)
         - EV edge
-        - metadata (slip ID, timestamp)
+        - metadata (slip ID, league, timestamp)
         """
+        league_key = league.upper() if league else "NBA"
+        max_limit = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["max_retail_bet_limit"]
+        capped_stake = min(float(risk_adjusted_stake), float(max_limit))
+
         def format_leg(leg: dict) -> dict:
             player = leg.get("player") or leg.get("Player")
             stat = leg.get("stat") or leg.get("prop") or leg.get("Market")
@@ -690,12 +741,13 @@ class SlipQueueManager:
             
         payload = {
             "slip_id": str(uuid.uuid4()),
+            "league": league_key,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "legs": [
                 format_leg(leg1),
                 format_leg(leg2)
             ],
-            "risk_adjusted_stake": float(risk_adjusted_stake),
+            "risk_adjusted_stake": float(capped_stake),
             "ev_edge": float(ev_edge)
         }
         return payload

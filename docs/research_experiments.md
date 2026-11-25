@@ -170,7 +170,7 @@ All evaluations are measured against a standardized Point-in-Time historical rep
 
 ### Experiment 5: L1 Objective (MAE Loss) & Monotonic Constraints
 - **Date**: 2026-09-07
-- **Hypothesis**: The previous models were trained using squared error (`reg:squarederror`), which heavily penalizes large residual outliers and pulls predictions away from the median. Since our primary evaluation metric is Mean Absolute Error (MAE), training directly on an L1 objective (`reg:absoluteerror` / `mae`) should naturally optimize our target metric. Furthermore, the tree models might be overfitting noisy regime shifts; applying strict **Monotonic Constraints** (e.g., higher vacated usage must *always* increase predictions, back-to-backs must *always* decrease predictions) will force the trees to respect structural basketball domain knowledge rather than memorizing historical noise.
+- **Hypothesis**: The previous models were trained using squared error (`reg:squarederror`), which heavily penalizes large residual outliers and pulls predictions away from the median. Since our primary evaluation metric is Mean Absolute Error (MAE), training directly on an L1 objective (`reg:absoluteerror` / `mae`) should naturally optimize our target metric. Furthermore, the tree models might be overfitting noisy regime shifts; applying strict **Monotonic Constraints** (e.g., higher vacated usage must *always* increase predictions, back-to-backs must *always* decrease predictions) will force the trees to respect structural basketball domain knowledge rather than overfitting historical noise.
 - **Methodology**: 
   - Changed XGBoost objective from `reg:squarederror` to `reg:absoluteerror`.
   - Changed LightGBM objective from `regression` to `mae`.
@@ -265,12 +265,15 @@ All evaluations are measured against a standardized Point-in-Time historical rep
 
 
 ### Experiment 9: Deep Categorical ID Embeddings & High-Speed Vectorized Evaluator (Iteration 3)
+> **[SUPERSEDED — LEAKAGE DETECTED IN AUDIT]**  
+> *Status: Invalidated by the Phase 1 Point-in-Time Leakage Audit. Fold 1 ignored `train_seasons` (training on future seasons `2024-25` and `2025-26`, verified by identical `training_samples = 83909` in both fold metadata files), `cum_min` omitted `.shift(1)`, NB dispersion $\alpha$ was calibrated on in-sample predictions, CV folds were not date-grouped, and evaluator row counts jumped vs. Experiment 8 (`27,750 → 27,980`) due to permissive NaN filtering and unshifted `bayesian_roll_stat`. Preserved below strictly as an audit trail; see **Experiment 13** for remediation.*
+
 - **Date**: 2026-09-07
-- **Hypothesis**: The model struggles with extreme variance players (like Luka Doncic) because the rolling numerical features don't capture intrinsic player profiles. By explicitly injecting `player_id`, `team_id`, and `opponent_team_id` as native categorical features, the XGBoost and LightGBM trees will be able to memorize player-specific terminal leaf nodes to adjust the residuals perfectly.
+- **Hypothesis**: The model struggles with extreme variance players (like Luka Doncic) because the rolling numerical features don't capture intrinsic player profiles. By explicitly injecting `player_id`, `team_id`, and `opponent_team_id` as native categorical features, the XGBoost and LightGBM trees can fit player-specific baseline residual offsets in terminal leaf nodes.
 - **Methodology**:
   - Re-introduced `player_id`, `team_id`, and `opponent_team_id` directly into `FEATURE_COLUMNS`.
   - Configured XGBoost with `enable_categorical: True` and LightGBM to natively interpret the categorical mappings without one-hot encoding.
-  - Rewrote the Backtester Evaluation engine (`historical_replay_core.py` / `evaluate_fast.py`) from a slow row-by-row simulation loop into a **lightning-fast Python Vectorized Evaluator** using `joblib.Parallel` and `pandas` dataframe concatenations. Evaluation time dropped from 20 minutes to under 25 seconds.
+  - Rewrote the Backtester Evaluation engine (`historical_replay_core.py` / `evaluate_fast.py`) from a slow row-by-row simulation loop into a **fast Python Vectorized Evaluator** using `joblib.Parallel` and `pandas` dataframe concatenations. Evaluation time dropped from 20 minutes to under 25 seconds.
 - **Results**:
   - **Fold 1 (2024-25)**:
     | Category | Count | Meta MAE | EWMA MAE | MAE Imp (%) | Sim CRPS |
@@ -286,4 +289,160 @@ All evaluations are measured against a standardized Point-in-Time historical rep
     | Rebounds | 28442 | 1.807    | 1.949    | +7.29%      | 1.275    |
     | Assists  | 28442 | 1.293    | 1.378    | +6.17%      | 0.886    |
     | OVERALL  | 85326 | 2.480    | 2.678    | +7.39%      | 1.793    |
-- **Diagnosis**: *Absolute Success!* The deep categorical embeddings resulted in an unprecedented 7.5% improvement in accuracy over EWMA, officially shattering the strict absolute thresholds (Points <4.65, Rebounds <1.9, Assists <1.3). The model natively memorizes specific player variances while maintaining robust generalization, completing the architectural goals.
+- **Diagnosis**: *Superseded Result.* Under the pre-audit pipeline, adding categorical ID embeddings reduced reported MAE by ~7.5% vs. EWMA across Points (< 4.65), Rebounds (< 1.90), and Assists (< 1.30) because the trees fitted player-level residual structure while operating on lookahead-contaminated training folds and unshifted features.
+
+---
+
+### Experiment 10: Cohort-Bucketed EWMA Alpha & Temporal Validation Gating
+> **[SUPERSEDED — LEAKAGE DETECTED IN AUDIT]**  
+> *Status: Invalidated by the Phase 1 Point-in-Time Leakage Audit. Inherited all Experiment 9 pipeline leaks and introduced full-career lookahead inside `assign_player_tier()` (unshifted multi-season `mean()` over future minutes and usage leaked future tier and `tier_alpha` into historical rolling features). Preserved strictly as an audit trail; see **Experiment 13**.*
+- **Date**: 2026-09-19
+- **Hypothesis**: The user suggested that while continuous per-player EWMA optimization risks overfitting small sample sizes, a "cohort bucketing" approach (assigning hardcoded, theoretically sound alphas to Starters, Rotation, and Fringe tiers based on career usage/minutes) would improve the EWMA baseline. Additionally, implementing temporal validation gating (early stopping on the last 15% of the timeline) instead of a fixed number of boosting rounds would prevent the CatBoost/XGBoost/LightGBM learners from overfitting to historical noise.
+- **Methodology**:
+  - Engineered `assign_player_tier()` to bucket players into 4 tiers based on career usage and minutes.
+  - Assigned static EWMA $\alpha$: Tier 1 (0.05), Tier 2 (0.10), Tier 3 (0.15), Tier 4 (0.25).
+  - Implemented temporal early stopping (85/15 split) for XGBoost and LightGBM base learners, taking the best iteration count to train the final full-dataset models.
+  - Retrained the meta-ensemble on Folds 1 and 2.
+- **Results**:
+  - **Fold 1 (2024-25)**:
+    | Category | Count | Meta MAE | EWMA MAE | Simulated CRPS |
+    |----------|-------|----------|----------|----------------|
+    | Points   | 27980 | 4.353    | 4.750    | 3.216          |
+    | Rebounds | 27980 | 1.834    | 1.991    | 1.293          |
+    | Assists  | 27980 | 1.304    | 1.409    | 0.893          |
+    | OVERALL  | 83940 | 2.497    | 2.717    | 1.801          |
+  - **Fold 2 (2025-26)**:
+    | Category | Count | Meta MAE | EWMA MAE | Simulated CRPS |
+    |----------|-------|----------|----------|----------------|
+    | Points   | 28442 | 4.368    | 4.698    | 3.188          |
+    | Rebounds | 28442 | 1.826    | 1.949    | 1.283          |
+    | Assists  | 28442 | 1.309    | 1.378    | 0.896          |
+    | OVERALL  | 85326 | 2.501    | 2.675    | 1.789          |
+- **Diagnosis**: *Regression*. Across Fold 2, performance slightly deteriorated compared to Experiment 9 (Points MAE from 4.339 to 4.368; Rebounds from 1.807 to 1.826; Assists from 1.293 to 1.309). This regression is likely driven by the hardcoded cohort thresholds being statistically suboptimal (e.g., > 25,000 career minutes is incredibly rare, almost no active players qualify for Tier 1) and replacing the heavily calibrated EWMA from Exp 9 with these hardcoded alphas. To achieve better results, we must rethink the cohort assignment logic and perhaps refine the base learner tuning.
+
+---
+
+### Experiment 11: Corrected Cohort Thresholds & Full-Dataset Base Learner Training
+> **[SUPERSEDED — LEAKAGE DETECTED IN AUDIT]**  
+> *Status: Invalidated by the Phase 1 Point-in-Time Leakage Audit. Inherited full-dataset `assign_player_tier()` career lookahead, ignored `train_seasons` isolation on Fold 1, unshifted `cum_min`, and in-sample NB dispersion calibration. Preserved strictly as an audit trail; see **Experiment 13**.*
+
+- **Date**: 2026-09-19
+- **Hypothesis**: The tier assignments in Experiment 10 were too strict, causing almost all players to fall into the "Fringe" bucket (alpha 0.50), introducing massive variance. Additionally, the early stopping mechanism split the final training dataset (90/10), discarding the most recent 10% of games. Correcting the tier thresholds to realistic NBA rotations and training the final model on 100% of the dataset (using the average optimal iterations from the CV folds) should restore the ML model performance while maintaining a superior EWMA baseline.
+- **Methodology**:
+  - Adjusted tiers: Star (alpha 0.20), Starter (alpha 0.25), Rotation (alpha 0.30), Fringe (alpha 0.35).
+  - Recorded the `best_iteration` from each of the 5 TimeSeriesSplit folds for XGB and LGB, averaged them, and trained the final models on 100% of the data.
+- **Results**:
+  - **Fold 1 (2024-25)**:
+    | Category | Count | Meta MAE | EWMA MAE | Simulated CRPS |
+    |----------|-------|----------|----------|----------------|
+    | Points   | 27980 | 4.459    | 4.717    | 3.261          |
+    | Rebounds | 27980 | 1.860    | 1.975    | 1.311          |
+    | Assists  | 27980 | 1.314    | 1.397    | 0.901          |
+    | OVERALL  | 83940 | 2.545    | 2.696    | 1.824          |
+  - **Fold 2 (2025-26)**:
+    | Category | Count | Meta MAE | EWMA MAE | Simulated CRPS |
+    |----------|-------|----------|----------|----------------|
+    | Points   | 28442 | 4.400    | 4.661    | 3.257          |
+    | Rebounds | 28442 | 1.826    | 1.932    | 1.288          |
+    | Assists  | 28442 | 1.303    | 1.367    | 0.892          |
+    | OVERALL  | 85326 | 2.509    | 2.653    | 1.812          |
+- **Diagnosis**: *Mixed (Baseline Success, ML Underfitting)*. The cohort bucketing worked perfectly! The overall EWMA baseline in Fold 2 dropped from 2.678 (Exp 9) to 2.653. However, the Meta MAE worsened (2.509 vs 2.480). The logs reveal that the temporal CV early-stopping dynamically restricted the trees (e.g., XGB=84, LGB=93 for Points), whereas Exp 9 hardcoded deep forests (XGB=150, LGB=500). By restricting tree depth via early-stopping, we successfully improved the baseline logic but caused the gradient boosters to heavily underfit.
+
+---
+
+### Experiment 12: Deep Cohort-Ensemble (Fixed Boost Rounds)
+> **[SUPERSEDED — LEAKAGE DETECTED IN AUDIT]**  
+> *Status: Invalidated by the Phase 1 Point-in-Time Leakage Audit. Fold 1 (`2024-25`) trained on all 83,909 samples across `2023-26`, `assign_player_tier()` leaked future-game career means into historical rows, `cum_min` omitted `.shift(1)`, and NB `alpha` was fit in-sample. Existing `models/wf_fold1` and `models/wf_fold2` artifacts reflect this superseded pipeline until retrained against PostgreSQL. Preserved strictly as an audit trail; see **Experiment 13**.*
+
+- **Date**: 2026-09-19
+- **Hypothesis**: The cohort bucketing from Iteration 2 established a stronger underlying statistical baseline by reflecting structural player variance. Pairing this EWMA baseline with deep residual forests (`n_estimators=150` for XGB, `num_boost_round=500` for LGB) should increase residual model capacity relative to Experiment 11.
+- **Methodology**:
+  - Retained the optimized cohort buckets: Star ($\alpha=0.20$), Starter ($\alpha=0.25$), Rotation ($\alpha=0.30$), Fringe ($\alpha=0.35$).
+  - Disabled dynamic early stopping for the final full-dataset models in `src/train_global_model.py`.
+  - Set final gradient boosters to fixed full-depth configurations.
+- **Results**:
+  - **Fold 1 (2024-25)**:
+    | Category | Count | Meta MAE | EWMA MAE | MAE Imp (%) | Simulated CRPS |
+    |----------|-------|----------|----------|-------------|----------------|
+    | Points   | 27980 | 4.244    | 4.717    | +10.03%     | 3.115          |
+    | Rebounds | 27980 | 1.799    | 1.975    | +8.91%      | 1.273          |
+    | Assists  | 27980 | 1.263    | 1.397    | +9.59%      | 0.868          |
+    | OVERALL  | 83940 | 2.435    | 2.696    | +9.68%      | 1.752          |
+  - **Fold 2 (2025-26)**:
+    | Category | Count | Meta MAE | EWMA MAE | MAE Imp (%) | Simulated CRPS |
+    |----------|-------|----------|----------|-------------|----------------|
+    | Points   | 28442 | 4.178    | 4.661    | +10.36%     | 3.083          |
+    | Rebounds | 28442 | 1.764    | 1.932    | +8.70%      | 1.248          |
+    | Assists  | 28442 | 1.251    | 1.367    | +8.49%      | 0.859          |
+    | OVERALL  | 85326 | 2.398    | 2.653    | +9.61%      | 1.730          |
+- **Diagnosis**: *Superseded Result.* Under the pre-audit pipeline, Fold 2 Points MAE measured **4.178** and overall MAE measured **2.398** across 85,326 predictions. These numbers are non-deployable because the training/evaluation flow contained future-season training contamination, unshifted `cum_min`, and career-mean cohort lookahead (remediated in **Experiment 13**).
+
+---
+
+### Experiment 13: Point-in-Time Leakage Remediation, Feature Parity Contract & Phase 1 Inference Benchmarks
+- **Date**: 2026-11-25
+- **Objective**: Remediate all point-in-time lookahead leaks uncovered in the Phase 1 audit of Experiments 9–12, enforce a unified offline–online feature contract (`FEATURE_SCHEMA_VERSION = "1.0.0"`), validate bitwise/exact evaluator parity, and benchmark production serving & C++20 Eigen portfolio allocation latency.
+- **Leakage Remediations Implemented**:
+  1. **`train_seasons` Isolation (`src/train_global_model.py`):** Filtered both database player discovery SQL and per-player DataFrames (`df_p["season"].isin(train_seasons)`) *before* feature compilation, preventing Fold 1 (`2024-25`) from ingesting future seasons; persisted `train_seasons` and `feature_schema_version` in saved `*_meta.json` artifacts.
+  2. **Causal `assign_player_tier()` & Shifted EWMAs (`src/feature_contract.py`):** Replaced full-career `.mean()` tiering with strictly causal `0..T-1` expanding means (`.shift(1).expanding(min_periods=1).mean()`) routed into season-partitioned `.shift(1)` EWMA streams (`_causal_tier_ewma()`).
+  3. **`.shift(1)` on `cum_min` & `roll_residual` (`src/feature_contract.py`, `src/historical_replay_core.py`):** Enforced `df["minutes_played"].shift(1).cumsum().fillna(0.0)` inside `compute_target_rolling_features()`, added `.shift(1)` to legacy `roll_residual`, and aligned vectorized evaluation (`evaluate_dataframe_vectorized`) with single-row sequential replay (`evaluate_dataframe_sequential`).
+  4. **Date-Grouped CV & OOF NB Dispersion Calibration (`src/train_global_model.py`):** Replaced row-wise splitting with `_iter_grouped_time_splits()` across distinct `start_time` timestamps to block intra-day leakage, and moved Optuna Negative Binomial `alpha` optimization strictly onto OOF residuals (`oof_meta_residuals`).
+  5. **Strict DNP `vacated_usage` Proxy (`src/features.py`):** Updated `get_sidelined_teammates_for_game()` and `build_player_feature_matrix()` to count sidelined co-stars only on `minutes_played == 0.0` (DNP / absent from game) instead of `minutes_played < 5.0`, eliminating intra-game early injury/ejection leakage.
+  6. **Historical Roster Lookup in `get_co_stars()` (`src/features.py`, `src/train_global_model.py`, `src/evaluate_fast.py`):** Removed mutable `players.current_team_id` joins from `get_co_stars()` in favor of inferring each candidate co-star's active team strictly from `player_game_logs JOIN games` (`gm.start_time < :target_date`), added causal per-row `team_id` schedule inference in `build_player_feature_matrix()`, and enforced exact seasonal end-date `target_date` SQL cutoffs in training/evaluation.
+  - *Remaining Minor Caveats:* `scrapers/backfill_games_and_metrics.py` still classifies static `players.position` across full-history `AVG` aggregates (historical DB rows were left untouched), and `vacated_usage` assumes historical `minutes_played == 0.0` serves as a pre-game ruled-out proxy.
+- **Parity, C++20 & Full Pytest Verification (`pytest`):**
+  - Added deterministic C++ binding unit suite `tests/test_cpp_bindings.py` (Shin's method de-vigging parity `< 1e-6` + Eigen `ColPivHouseholderQR` Kelly accuracy & constraints) and updated `.gitignore` with `CMakeFiles/`.
+  - Ran full suite `./venv/bin/pytest -v` against active PostgreSQL 17 (`sports_db`, `102,984` logs) and local Redis: **101 passed, 7 pre-existing failures** (`108` collected; zero Phase 1 regressions — 100% pass across `tests/test_feature_parity.py` 8/8, `tests/test_serving_api.py` 15/15, `tests/test_cpp_bindings.py` 10/10, `tests/test_multi_league_architecture.py` 6/6, `tests/test_hfp_poller.py` 8/8, `tests/test_tuning_and_diagnostics.py` 5/5, `tests/test_contextual_features_pit.py` 4/4; the 7 failures stem from pre-existing refactor drift in `test_historical_replay.py`, `test_shap_analyzer.py`, `test_smart_cache_and_discord_handler.py`, `test_src_dashboard.py`, and `test_walk_forward.py`).
+- **Stage-by-Stage Latency Benchmark (`benchmarks/profile_inference.py`, `benchmarks/latest_latency_report.json`):**
+  - Warmup: 100 iterations | Timed: 1,000 iterations (`time.perf_counter_ns()`) | Redis Hydration Backend: `live_local_redis` (post-retrain `models/wf_fold2`)
+
+  | Pipeline Stage | p50 (ms) | p95 (ms) | p99 (ms) | Mean (ms) |
+  | :--- | ---: | ---: | ---: | ---: |
+  | Redis Feature Hydration (50-game JSON) | 0.084 | 0.106 | 0.111 | 0.087 |
+  | Meta-Ensemble Inference (Single Leg) | 4.494 | 4.730 | 4.841 | 4.514 |
+  | Meta-Ensemble Inference (32-Leg Batch) | 4.705 | 4.948 | 5.612 | 4.772 |
+  | ZINB + Clayton/Gumbel Copula (Single Pair) | 0.034 | 0.037 | 0.042 | 0.034 |
+  | ZINB + Clayton/Gumbel Copula (32-Leg Slate) | 0.036 | 0.038 | 0.042 | 0.036 |
+  | API Round-Trip `POST /v1/predict` (1 Leg) | 6.124 | 6.824 | 9.556 | 6.323 |
+  | API Round-Trip `POST /v1/predict` (32 Legs) | 9.295 | 10.478 | 30.591 | 9.732 |
+  | API Round-Trip `POST /v1/allocate` (15 Legs) | 1.647 | 1.877 | 2.378 | 1.719 |
+  | API Round-Trip `POST /v1/allocate` (32 Legs) | 3.204 | 3.528 | 4.616 | 3.339 |
+
+- **C++ Eigen `ColPivHouseholderQR` vs. Pure Python/NumPy/SciPy Kelly Solver (`-std=c++20 -O3 -Wall -Wextra -Wpedantic -Werror`):**
+
+  | Matrix Regime | N | C++ Eigen p50 (us) | NumPy `lstsq` p50 (us) | SciPy Pivoted QR p50 (us) | Speedup vs NumPy | Speedup vs SciPy | Residual `\|\|Σw - μ\|\|` (Eigen) | Residual `\|\|Σw - μ\|\|` (NumPy) |
+  | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | well_conditioned | 5 | 1.67 | 10.46 | 27.71 | 6.28x | 16.63x | 5.49e-18 | 4.07e-18 |
+  | well_conditioned | 15 | 6.38 | 25.25 | 31.75 | 3.96x | 4.98x | 4.49e-18 | 1.18e-17 |
+  | well_conditioned | 30 | 19.33 | 70.12 | 40.62 | 3.63x | 2.10x | 9.46e-18 | 2.89e-17 |
+  | well_conditioned | 50 | 51.62 | 188.46 | 59.58 | 3.65x | 1.15x | 1.58e-17 | 3.66e-17 |
+  | ill_conditioned | 5 | 1.62 | 9.83 | 27.29 | 6.05x | 16.80x | 1.12e-17 | 1.16e-17 |
+  | ill_conditioned | 15 | 6.38 | 20.62 | 31.58 | 3.24x | 4.95x | 6.15e-18 | 1.71e-16 |
+  | ill_conditioned | 30 | 19.12 | 61.08 | 39.96 | 3.19x | 2.09x | 8.74e-18 | 2.88e-16 |
+  | ill_conditioned | 50 | 51.46 | 170.62 | 60.46 | 3.32x | 1.17x | 1.12e-17 | 6.35e-17 |
+  | rank_deficient | 5 | 1.58 | 9.79 | 28.42 | 6.19x | 17.95x | 2.65e-18 | 1.65e-18 |
+  | rank_deficient | 15 | 6.08 | 21.71 | 32.04 | 3.57x | 5.27x | 4.57e-05 | 1.74e-04 |
+  | rank_deficient | 30 | 19.08 | 58.17 | 39.92 | 3.05x | 2.09x | 1.99e-04 | 2.12e-17 |
+  | rank_deficient | 50 | 51.33 | 171.29 | 61.79 | 3.34x | 1.20x | 2.11e-03 | 1.36e-17 |
+
+  *Note on `rank_deficient` $N=50$ residual (`2.11e-03` vs `1.36e-17`):* Both solvers are evaluated on the exact same $(\Sigma, \mu)$ inputs with zero asymmetric shrinkage or truncation. Unclipped `Eigen::ColPivHouseholderQR` identifies `rank = 48` and solves $\Sigma f = \mu$ to `5.44e-18`; however, unlike `np.linalg.lstsq`'s minimum-L2-norm pseudoinverse (all positive on this $N=50$ sample), the sparse basic pivoted-QR basis had 4 negative entries (`min = -0.027921`) that were subsequently projected to `0.0` by `kelly_optimizer.cpp`'s long-only clipping constraint (`max(f, 0)`).
+
+- **Clean Walk-Forward Retrain Metrics (Fold 1 & Fold 2 — `sports_db` PG17):**
+  - *Artifact Verification (`schema = "1.0.0"`):* `models/wf_fold1` (`train_seasons = ["2023-24"]`, `training_samples = 27,471`); `models/wf_fold2` (`train_seasons = ["2023-24", "2024-25"]`, `training_samples = 55,006`).
+  - **Fold 1 (Train: `['2023-24']` → Test: `['2024-25']`):**
+    | Category | Count | Meta MAE | EWMA MAE | MAE Imp (%) | Simulated CRPS |
+    | :--- | ---: | ---: | ---: | ---: | ---: |
+    | Points | 27519 | **4.642** | 4.736 | **+1.99%** | 3.431 |
+    | Rebounds | 27519 | **1.941** | 1.964 | **+1.20%** | 1.358 |
+    | Assists | 27519 | **1.350** | 1.372 | **+1.62%** | 0.930 |
+    | OVERALL | **82557** | **2.644** | **2.691** | **+1.73%** | **1.906** |
+  - **Fold 2 (Train: `['2023-24', '2024-25']` → Test: `['2025-26']`):**
+    | Category | Count | Meta MAE | EWMA MAE | MAE Imp (%) | Simulated CRPS |
+    | :--- | ---: | ---: | ---: | ---: | ---: |
+    | Points | 27968 | **4.594** | 4.678 | **+1.79%** | 3.397 |
+    | Rebounds | 27968 | **1.923** | 1.938 | **+0.77%** | 1.338 |
+    | Assists | 27968 | **1.355** | 1.373 | **+1.28%** | 0.927 |
+    | OVERALL | **83904** | **2.624** | **2.663** | **+1.45%** | **1.887** |
+
+- **Diagnostic Comparison vs. Superseded Experiment 12:** Removing future-season training contamination (`83,909 → 27,471` Fold 1 / `55,006` Fold 2 training logs), full-career `assign_player_tier()` lookahead, unshifted `cum_min`, intra-day CV splits, and in-sample dispersion calibration raises true out-of-sample OVERALL MAE from the leaked Exp 12 readings (`2.435` / `2.398`) to **`2.644`** (Fold 1) and **`2.624`** (Fold 2). Critically, the leak-free Meta-Ensemble **still outperforms the causal cohort-EWMA baseline in every stat across both folds** (`+0.77%` to `+1.99%`) and **honestly clears the `< 4.65` Points MAE threshold in both Fold 1 (`4.642`) and Fold 2 (`4.594`)**.
+

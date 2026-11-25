@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import logging
+from src.config import LEAGUE_CONFIG
 
 logger = logging.getLogger("EndogenousSimulationEngine")
 
@@ -8,7 +9,7 @@ class EndogenousGameSimulator:
     def __init__(self, n_iterations: int = 10000):
         self.n_iterations = n_iterations
         
-    def simulate_game(self, match_context: dict, players: list) -> pd.DataFrame:
+    def simulate_game(self, match_context: dict, players: list, league: str = "NBA") -> pd.DataFrame:
         """
         Simulates a game minute-by-minute for n_iterations.
         match_context: {
@@ -16,22 +17,24 @@ class EndogenousGameSimulator:
             'away_team': 'DEN',
             'home_ortg': 115.0, # Expected pts per 100 pos
             'away_ortg': 118.0,
-            'pace': 100.0       # Possessions per 48 min
+            'pace': 100.0       # Possessions per regulation min
         }
         players: list of dicts with:
             - 'player_id'
             - 'team'
             - 'is_starter'
-            - 'survival_probs': list/array of 48 probabilities (survival function)
+            - 'survival_probs': list/array of regulation probabilities (survival function)
             - 'efficiencies': dict of target -> { 'lambda': 25.0, 'alpha': 0.15 }
-              where lambda is points per 48 mins, alpha is dispersion.
+              where lambda is points per regulation mins, alpha is dispersion.
               
         Returns a DataFrame of simulated stats per player, averaged over iterations,
         as well as raw simulation matrix for downstream O/U pricing.
         """
         # We process all 10,000 iterations in parallel using NumPy arrays.
         n_iters = self.n_iterations
-        n_mins = 48
+        league_key = league.upper() if league else "NBA"
+        reg_min = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["regulation_minutes"]
+        n_mins = int(reg_min)
         n_players = len(players)
         
         # Game State
@@ -39,8 +42,8 @@ class EndogenousGameSimulator:
         away_score = np.zeros(n_iters)
         
         # Expected points per minute per team
-        home_ppm = (match_context['home_ortg'] * (match_context['pace'] / 100.0)) / 48.0
-        away_ppm = (match_context['away_ortg'] * (match_context['pace'] / 100.0)) / 48.0
+        home_ppm = (match_context['home_ortg'] * (match_context['pace'] / 100.0)) / reg_min
+        away_ppm = (match_context['away_ortg'] * (match_context['pace'] / 100.0)) / reg_min
         
         # Initialize Player states
         # player_active: shape (n_players, n_iters) - True if currently playing
@@ -58,12 +61,16 @@ class EndogenousGameSimulator:
         hazard_rates = np.zeros((n_players, n_mins))
         for i, p in enumerate(players):
             S = np.array(p.get('survival_probs', np.linspace(1, 0, n_mins)))
+            if len(S) != n_mins:
+                # Interpolate or slice to match current league regulation minutes
+                S = np.interp(np.linspace(0, 1, n_mins), np.linspace(0, 1, len(S)), S)
             S_shifted = np.insert(S[:-1], 0, 1.0) # S(t-1)
             # Hazard = (S(t-1) - S(t)) / S(t-1)
             h = (S_shifted - S) / (S_shifted + 1e-9)
             hazard_rates[i, :] = np.clip(h, 0, 1)
 
         # Minute-by-Minute State Machine
+        fourth_quarter_start = int(reg_min * 0.75)
         for t in range(n_mins):
             # 1. Scoring (Add Poisson noise to expected points per minute)
             home_pts_this_min = np.random.poisson(lam=home_ppm, size=n_iters)
@@ -72,13 +79,13 @@ class EndogenousGameSimulator:
             away_score += away_pts_this_min
             
             # 2. Blowout Truncation Rule
-            # In 4th quarter (t >= 36), if point differential > 20, starters are pulled.
-            blowout_mask = (t >= 36) & (np.abs(home_score - away_score) >= 20)
+            # In 4th quarter (t >= fourth_quarter_start), if point differential > 20, starters are pulled.
+            blowout_mask = (t >= fourth_quarter_start) & (np.abs(home_score - away_score) >= 20)
             
             # 3. Process Player Survival and Minutes
             for i, p in enumerate(players):
                 # If blowout and player is starter, they are pulled (active = False)
-                if p['is_starter']:
+                if p.get('is_starter', True):
                     player_active[i, blowout_mask] = False
                 
                 # For those currently active, check natural substitution/foul hazard
@@ -101,11 +108,11 @@ class EndogenousGameSimulator:
             }
             
             for target_key, eff_params in p['efficiencies'].items():
-                lam_per_48 = eff_params['lambda']
+                lam_per_reg = eff_params['lambda']
                 alpha = eff_params['alpha']
                 
                 # mu_i for each iteration based on simulated T
-                mu_i = (lam_per_48 / 48.0) * simulated_t
+                mu_i = (lam_per_reg / reg_min) * simulated_t
                 
                 # If alpha > 0, generate Negative Binomial
                 # np.random.negative_binomial takes n (successes) and p (prob of success)

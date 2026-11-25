@@ -8,6 +8,13 @@ import sqlalchemy
 import xgboost as xgb
 import lightgbm as lgb
 from .features import ContextualFeatureEngine
+from .feature_contract import (
+    PREGAME_CONTEXT_COLUMNS,
+    build_online_feature_row,
+    get_active_feature_columns,
+    predict_meta_ensemble,
+)
+from .models import get_default_priors
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("HistoricalReplayCore")
@@ -84,6 +91,15 @@ def evaluate_prediction_accuracy_static(player_id: str, player_name: str, stat_c
         roll_ast_rate = float(history_df['ast_rate'].ewm(alpha=0.3, adjust=False).mean().iloc[-1])
         roll_plus_minus = float(history_df['plus_minus'].ewm(alpha=0.3, adjust=False).mean().iloc[-1])
         roll_usg_efficiency = float(history_df['usg_efficiency'].ewm(alpha=0.3, adjust=False).mean().iloc[-1])
+        roll_fga = float(history_df['field_goals_attempted'].ewm(alpha=0.3, adjust=False).mean().iloc[-1]) if 'field_goals_attempted' in history_df.columns else 0.0
+        roll_fta = float(history_df['free_throws_attempted'].ewm(alpha=0.3, adjust=False).mean().iloc[-1]) if 'free_throws_attempted' in history_df.columns else 0.0
+
+        if 'points' in history_df.columns:
+            points_rolling_std_dev = float(history_df['points'].rolling(5, min_periods=1).std().fillna(0.0).iloc[-1])
+        else:
+            points_rolling_std_dev = 0.0
+            
+        usage_x_minutes_interaction = roll_usg * roll_min
 
         if hasattr(feature_engine, "get_active_features"):
             active_feats = feature_engine.get_active_features(player_id, target_date=game_time)
@@ -111,8 +127,15 @@ def evaluate_prediction_accuracy_static(player_id: str, player_name: str, stat_c
             
         roll_min_series = history_df["minutes_played"].ewm(alpha=0.3, adjust=False).mean()
         bayesian_roll_stat = (np.array(history_df[stat_col].ewm(alpha=0.3, adjust=False).mean()) / (roll_min_series + 1e-5)) * roll_min_series
-        target_residual = history_df[stat_col].values - bayesian_roll_stat
-        roll_residual = float(pd.Series(target_residual).ewm(alpha=0.3, adjust=False).mean().iloc[-1])
+        if getattr(feature_engine, "league", "NBA") == "WNBA":
+            if stat_col == "points":
+                raw_res = (history_df[stat_col].values / (history_df['minutes_played'].values + 1e-5)) - (np.array(history_df[stat_col].ewm(alpha=0.3, adjust=False).mean()) / (roll_min_series + 1e-5))
+                target_residual = np.clip(raw_res, -2.0, 2.0)
+            else:
+                target_residual = history_df[stat_col].values - np.array(history_df[stat_col].ewm(alpha=0.3, adjust=False).mean())
+        else:
+            target_residual = history_df[stat_col].values - bayesian_roll_stat
+        roll_residual = float(pd.Series(target_residual).shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0).iloc[-1])
 
         team_id = float(active_feats.get("team_id", 0))
         opponent_team_id = float(active_feats.get("opponent_team_id", 0))
@@ -121,32 +144,56 @@ def evaluate_prediction_accuracy_static(player_id: str, player_name: str, stat_c
         except (ValueError, TypeError):
             pid_num = 0.0
 
-        pred_features = np.array([[
-            roll_min, roll_stat, roll_usg, 
-            active_feats.get("days_rest", 2.0), active_feats.get("is_back_to_back", 0.0),
-            active_feats.get("opp_def_rating", 112.0), active_feats.get("opp_pace_factor", 100.0), 
-            active_feats.get("opp_pos_pts_allowed", 20.0), active_feats.get("vacated_usage", 0.0), 
-            roll_pot_ast, roll_touches, roll_passes_made,
-            roll_time_of_possession_sec, roll_def_dist,
-            is_home_game, pace_differential, roll_stat_var, roll_residual,
-            roll_ts_pct, roll_reb_rate, roll_ast_rate, roll_shorthanded_points,
-            roll_plus_minus, roll_usg_efficiency,
-            pid_num, team_id, opponent_team_id
-        ]], dtype=np.float32)
+        def assign_player_tier(minutes, usg):
+            if minutes >= 32 and usg >= 0.28:
+                return 'SUPERSTAR'
+            elif minutes >= 30 and usg >= 0.23:
+                return 'STAR'
+            elif minutes >= 25:
+                return 'STARTER'
+            elif minutes >= 15:
+                return 'ROLE_PLAYER'
+            else:
+                return 'BENCH'
+        
+        tier_order = ['BENCH', 'ROLE_PLAYER', 'STARTER', 'STAR', 'SUPERSTAR']
+        tier_name = assign_player_tier(roll_min, roll_usg)
+        player_tier_val = tier_order.index(tier_name)
 
-        pred_df = pd.DataFrame(pred_features, columns=[
-            'roll_min', 'roll_stat', 'roll_usg',
-            'days_rest', 'is_back_to_back', 'opp_def_rating', 'opp_pace_factor',
-            'opp_pos_pts_allowed', 'vacated_usage',
-            'roll_potential_assists', 'roll_touches', 'roll_passes_made',
-            'roll_time_of_possession_sec', 'roll_defender_distance',
-            'is_home_game', 'pace_differential', 'roll_stat_var', 'roll_residual',
-            'roll_ts_pct', 'roll_reb_rate', 'roll_ast_rate', 'roll_shorthanded_points',
-            'roll_plus_minus', 'roll_usg_efficiency',
-            'player_id', 'team_id', 'opponent_team_id'
-        ])
+        from src.train_global_model import FEATURE_COLUMNS, WNBA_FEATURE_COLUMNS
+        active_cols = WNBA_FEATURE_COLUMNS if feature_engine.league == "WNBA" else FEATURE_COLUMNS
+        if getattr(feature_engine, "league", "NBA") == "WNBA" and stat_category in ["Points", "pts", "points"]:
+            active_cols = active_cols + ['points_rolling_std_dev', 'usage_x_minutes_interaction']
+        
+        base_features = {
+            'roll_min': roll_min, 'roll_stat': roll_stat, 'roll_usg': roll_usg,
+            'days_rest': active_feats.get("days_rest", 2.0),
+            'is_back_to_back': active_feats.get("is_back_to_back", 0.0),
+            'opp_def_rating': active_feats.get("opp_def_rating", 112.0),
+            'opp_pace_factor': active_feats.get("opp_pace_factor", 100.0),
+            'opp_pos_pts_allowed': active_feats.get("opp_pos_pts_allowed", 20.0),
+            'vacated_usage': active_feats.get("vacated_usage", 0.0),
+            'roll_potential_assists': roll_pot_ast, 'roll_touches': roll_touches,
+            'roll_passes_made': roll_passes_made, 'roll_time_of_possession_sec': roll_time_of_possession_sec,
+            'roll_defender_distance': roll_def_dist,
+            'is_home_game': is_home_game, 'pace_differential': pace_differential,
+            'roll_stat_var': roll_stat_var, 'roll_residual': roll_residual,
+            'roll_ts_pct': roll_ts_pct, 'roll_reb_rate': roll_reb_rate,
+            'roll_ast_rate': roll_ast_rate, 'roll_shorthanded_points': roll_shorthanded_points,
+            'roll_plus_minus': roll_plus_minus, 'roll_usg_efficiency': roll_usg_efficiency,
+            'roll_fga': roll_fga, 'roll_fta': roll_fta,
+            'roll_expected_points': 2.0 * roll_ts_pct * (roll_fga + 0.44 * roll_fta),
+            'player_id': pid_num, 'team_id': team_id, 'opponent_team_id': opponent_team_id,
+            'player_tier': player_tier_val,
+            'points_rolling_std_dev': points_rolling_std_dev,
+            'usage_x_minutes_interaction': usage_x_minutes_interaction
+        }
+        
+        pred_features = np.array([[base_features[c] for c in active_cols]], dtype=np.float32)
+        pred_df = pd.DataFrame(pred_features, columns=active_cols)
         for col in ['player_id', 'team_id', 'opponent_team_id']:
-            pred_df[col] = pred_df[col].fillna(0).astype(int).astype(str).astype('category')
+            if col in pred_df.columns:
+                pred_df[col] = pred_df[col].fillna(0).astype(float)
 
         ensemble = loaded_ensembles.get(market_key, {})
         model_xgb = ensemble.get("xgb")
@@ -156,15 +203,25 @@ def evaluate_prediction_accuracy_static(player_id: str, player_name: str, stat_c
         xgb_residual = float(model_xgb.predict(pred_df)[0]) if model_xgb else 0.0
         lgb_residual = float(model_lgb.predict(pred_df)[0]) if model_lgb else xgb_residual
 
-        if meta_data and "weights" in meta_data and "intercept" in meta_data:
-            w = meta_data["weights"]
-            intercept = meta_data["intercept"]
-            if len(w) == 3:
-                meta_prediction = ewma_baseline + intercept + (w[0] * xgb_residual) + (w[1] * lgb_residual) + (w[2] * ewma_baseline)
+        if getattr(feature_engine, "league", "NBA") == "WNBA" and stat_category in ["Points", "pts", "points"]:
+            if meta_data and "weights" in meta_data and "intercept" in meta_data:
+                w = meta_data["weights"]
+                intercept = meta_data["intercept"]
+                meta_rate_residual = intercept + (w[0] * xgb_residual) + (w[1] * lgb_residual)
             else:
-                meta_prediction = ewma_baseline + intercept + (w[0] * xgb_residual) + (w[1] * lgb_residual)
+                meta_rate_residual = (xgb_residual + lgb_residual) / 2.0
+            
+            meta_prediction = ewma_baseline + (meta_rate_residual * roll_min_series.iloc[-1])
         else:
-            meta_prediction = ewma_baseline + (xgb_residual + lgb_residual) / 2.0
+            if meta_data and "weights" in meta_data and "intercept" in meta_data:
+                w = meta_data["weights"]
+                intercept = meta_data["intercept"]
+                if len(w) == 3:
+                    meta_prediction = ewma_baseline + intercept + (w[0] * xgb_residual) + (w[1] * lgb_residual) + (w[2] * ewma_baseline)
+                else:
+                    meta_prediction = ewma_baseline + intercept + (w[0] * xgb_residual) + (w[1] * lgb_residual)
+            else:
+                meta_prediction = ewma_baseline + (xgb_residual + lgb_residual) / 2.0
 
         meta_prediction = max(0.001, float(meta_prediction))
         
@@ -199,11 +256,12 @@ def evaluate_prediction_accuracy_static(player_id: str, player_name: str, stat_c
             "crps": crps_val
         }
     except Exception as e:
+        print(f"Exception in evaluate_prediction_accuracy_static: {e}")
         return None
 
 
 class HistoricalReplayCore:
-    def __init__(self, db_uri: str = None, model_dir: str = "models"):
+    def __init__(self, db_uri: str = None, model_dir: str = "models", league: str = "NBA"):
         self.db_uri = db_uri or os.getenv(
             "POSTGRES_URI", "postgresql+psycopg2://postgres:password@localhost:5432/sports_db"
         )
@@ -212,7 +270,8 @@ class HistoricalReplayCore:
 
         self.model_dir = model_dir
         self.engine = sqlalchemy.create_engine(self.db_uri)
-        self.feature_engine = ContextualFeatureEngine(db_uri=self.db_uri)
+        self.league = league
+        self.feature_engine = ContextualFeatureEngine(db_uri=self.db_uri, league=league)
 
         self.market_target_map = {
             "Points": "pts",
@@ -302,7 +361,7 @@ class HistoricalReplayCore:
 
     def _load_priors(self):
         from src.models import get_default_priors
-        self.cached_priors = get_default_priors()
+        self.cached_priors = get_default_priors(league=self.league)
         logger.info("Loaded positional priors successfully.")
 
     def run_backtest(
@@ -357,6 +416,9 @@ class HistoricalReplayCore:
             if return_summary:
                 return {"summary": []}
             return []
+        if max_box_scores and max_box_scores > 0:
+            logs_df = logs_df.head(max_box_scores)
+            total_logs = len(logs_df)
 
         row_dicts = logs_df.to_dict('records')
 
@@ -370,6 +432,7 @@ class HistoricalReplayCore:
         _stat_to_market = self.stat_to_market
         _loaded_ensembles = self.loaded_ensembles
         _cached_priors = self.cached_priors
+        _league = self.feature_engine.league
         
         # Loky worker initialization
         def process_row_loky(row_data):
@@ -377,7 +440,7 @@ class HistoricalReplayCore:
             global _worker_engine, _worker_fe
             if '_worker_engine' not in globals():
                 _worker_engine = sqlalchemy.create_engine(_db_uri)
-                _worker_fe = ContextualFeatureEngine(db_uri=_db_uri)
+                _worker_fe = ContextualFeatureEngine(db_uri=_db_uri, league=_league)
                 
             player_id = str(row_data["player_id"])
             player_name = row_data["player_name"]
@@ -396,7 +459,7 @@ class HistoricalReplayCore:
                     if eval_res:
                         res_list.append(eval_res)
                 except Exception as e:
-                    pass
+                    print(f"Exception in loky worker: {e}")
             return res_list
 
         is_mocked = (
@@ -424,8 +487,8 @@ class HistoricalReplayCore:
                             )
                             if eval_res:
                                 results.append(eval_res)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"Exception in sync loop: {e}")
         else:
             logger.info(f"Evaluating {total_logs} box scores using multi-processing...")
             # Parallel execution with joblib
@@ -504,3 +567,136 @@ class HistoricalReplayCore:
         if return_summary:
             return {"results": results, "summary": summary}
         return results
+
+
+def evaluate_dataframe_sequential(
+    player_dfs: list,
+    models: dict,
+    test_seasons: list,
+    player_positions: dict = None,
+    cached_priors: dict = None,
+    league: str = "NBA",
+    compute_crps: bool = False,
+) -> tuple:
+    """Single-row sequential point-in-time replay matching `evaluate_fast.py`.
+
+    For every target game T in `test_seasons`, strictly slices player history to rows 0..T-1
+    with `start_time < T.start_time` and passes only pre-game context for game T into
+    `build_online_feature_row` + `predict_meta_ensemble`.
+    """
+    league_key = (league or "NBA").upper()
+    positions = player_positions or {}
+    priors = cached_priors or get_default_priors(league=league_key)
+    target_metrics = {"points": "pts", "rebounds": "reb", "assists": "ast"}
+
+    all_rows = []
+    for stat_col, target_key in target_metrics.items():
+        if target_key not in models or not models[target_key]:
+            continue
+
+        xgb_model = models[target_key].get("xgb")
+        lgb_model = models[target_key].get("lgb")
+        meta_data = models[target_key].get("meta", {})
+        xgb_cats = models[target_key].get("xgb_categories")
+        active_cols = get_active_feature_columns(league=league_key, stat_col=stat_col)
+
+        for df_p in player_dfs:
+            if df_p is None or df_p.empty or len(df_p) < 2 or stat_col not in df_p.columns:
+                continue
+
+            df_sorted = df_p.copy()
+            if "start_time" in df_sorted.columns:
+                df_sorted["start_time"] = pd.to_datetime(df_sorted["start_time"], utc=True)
+                sort_cols = ["start_time", "game_id"] if "game_id" in df_sorted.columns else ["start_time"]
+                df_sorted = df_sorted.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+            else:
+                df_sorted = df_sorted.reset_index(drop=True)
+
+            pid = str(df_sorted["player_id"].iloc[0]) if "player_id" in df_sorted.columns else "0"
+            pos = positions.get(pid, "SG")
+
+            for idx in range(len(df_sorted)):
+                row = df_sorted.iloc[idx]
+                if test_seasons and "season" in df_sorted.columns and row["season"] not in test_seasons:
+                    continue
+                if pd.isna(row[stat_col]):
+                    continue
+
+                history_df = df_sorted.iloc[:idx].copy()
+                target_ctx = {c: row[c] for c in PREGAME_CONTEXT_COLUMNS if c in df_sorted.columns}
+                feat_series, _ = build_online_feature_row(
+                    player_id=pid,
+                    history_df=history_df,
+                    target_context=target_ctx,
+                    stat_col=stat_col,
+                    position=pos,
+                    cached_priors=priors,
+                    league=league_key,
+                )
+
+                if any(pd.isna(feat_series[c]) for c in active_cols) or pd.isna(feat_series["bayesian_roll_stat"]):
+                    continue
+
+                row_df = pd.DataFrame([feat_series])
+                ewma_val = (
+                    float(feat_series["roll_stat"])
+                    if league_key == "WNBA"
+                    else float(feat_series["bayesian_roll_stat"])
+                )
+                preds = predict_meta_ensemble(
+                    row_df,
+                    active_cols,
+                    xgb_model=xgb_model,
+                    lgb_model=lgb_model,
+                    meta_data=meta_data,
+                    ewma_baseline=np.array([ewma_val], dtype=float),
+                    league=league_key,
+                    stat_col=stat_col,
+                    roll_min=np.array([float(feat_series["roll_min"])], dtype=float),
+                    xgb_categories=xgb_cats,
+                )
+
+                all_rows.append(
+                    {
+                        "player_id": pid,
+                        "game_id": row["game_id"] if "game_id" in df_sorted.columns else idx,
+                        "start_time": row["start_time"] if "start_time" in df_sorted.columns else pd.NaT,
+                        "stat_category": target_key,
+                        "actual_value": float(row[stat_col]),
+                        "meta_prediction": float(preds["meta_prediction"][0]),
+                        "ewma_baseline": ewma_val,
+                        "xgb_residual": float(preds["xgb_residual"][0]),
+                        "lgb_residual": float(preds["lgb_residual"][0]),
+                        "crps": 0.0,
+                    }
+                )
+
+    if not all_rows:
+        return pd.DataFrame(), []
+
+    res_df = pd.DataFrame(all_rows)
+    sort_cols = [c for c in ("stat_category", "player_id", "start_time", "game_id") if c in res_df.columns]
+    if sort_cols:
+        res_df = res_df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+
+    summary = []
+    for stat, group in res_df.groupby("stat_category"):
+        summary.append(
+            {
+                "Category": stat,
+                "Count": int(len(group)),
+                "Meta MAE": float(np.mean(np.abs(group["actual_value"] - group["meta_prediction"]))),
+                "EWMA MAE": float(np.mean(np.abs(group["actual_value"] - group["ewma_baseline"]))),
+                "Sim CRPS": float(np.mean(group["crps"])),
+            }
+        )
+    summary.append(
+        {
+            "Category": "OVERALL",
+            "Count": int(len(res_df)),
+            "Meta MAE": float(np.mean(np.abs(res_df["actual_value"] - res_df["meta_prediction"]))),
+            "EWMA MAE": float(np.mean(np.abs(res_df["actual_value"] - res_df["ewma_baseline"]))),
+            "Sim CRPS": float(np.mean(res_df["crps"])),
+        }
+    )
+    return res_df, summary

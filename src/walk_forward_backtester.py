@@ -36,6 +36,7 @@ class WalkForwardBacktester:
         db_uri: str = None,
         tuning_mode: str = "domain_priors",
         inner_trials: int = 15,
+        league: str = "NBA",
     ):
         self.target_keys = target_keys or ["pts", "reb", "ast"]
         self.max_box_scores = max_box_scores
@@ -43,22 +44,42 @@ class WalkForwardBacktester:
         self.db_uri = db_uri
         self.tuning_mode = tuning_mode
         self.inner_trials = inner_trials
-        self.folds = [
-            {
-                "fold_id": 1,
-                "name": "Fold 1",
-                "train_seasons": ["2023-24"],
-                "test_seasons": ["2024-25"],
-                "model_dir": "models/wf_fold1",
-            },
-            {
-                "fold_id": 2,
-                "name": "Fold 2",
-                "train_seasons": ["2023-24", "2024-25"],
-                "test_seasons": ["2025-26"],
-                "model_dir": "models/wf_fold2",
-            },
-        ]
+        self.league = league.upper()
+        
+        if self.league == "WNBA":
+            self.folds = [
+                {
+                    "fold_id": 1,
+                    "name": "WNBA Fold 1",
+                    "train_seasons": ["2021", "2022"],
+                    "test_seasons": ["2023"],
+                    "model_dir": "models/wnba_wf_fold1",
+                },
+                {
+                    "fold_id": 2,
+                    "name": "WNBA Fold 2",
+                    "train_seasons": ["2021", "2022", "2023"],
+                    "test_seasons": ["2024"],
+                    "model_dir": "models/wnba_wf_fold2",
+                }
+            ]
+        else:
+            self.folds = [
+                {
+                    "fold_id": 1,
+                    "name": "Fold 1",
+                    "train_seasons": ["2023-24"],
+                    "test_seasons": ["2024-25"],
+                    "model_dir": "models/wf_fold1",
+                },
+                {
+                    "fold_id": 2,
+                    "name": "Fold 2",
+                    "train_seasons": ["2023-24", "2024-25"],
+                    "test_seasons": ["2025-26"],
+                    "model_dir": "models/wf_fold2",
+                }
+            ]
 
     def check_models_exist(self, model_dir: str) -> bool:
         """Checks whether all required model artifacts exist for target keys in model_dir."""
@@ -101,11 +122,18 @@ class WalkForwardBacktester:
         elif self.tuning_mode == "domain_priors":
             config_path = "config/domain_priors_hyperparameters.json"
 
+        if self.league == "WNBA":
+            config_path = "config/wnba_master_config.json"
+            if not os.path.exists(config_path):
+                # Fallback if tuning script hasn't been run yet
+                config_path = "config/stat_hyperparameters.json"
+                
         train_global_ensemble(
             target_keys=self.target_keys,
             config_path=config_path,
             train_seasons=fold_info["train_seasons"],
             model_dir=fold_info["model_dir"],
+            league=self.league
         )
 
     def evaluate_fold(self, fold_info: dict) -> dict:
@@ -118,6 +146,7 @@ class WalkForwardBacktester:
         replay = HistoricalReplayCore(
             db_uri=self.db_uri,
             model_dir=fold_info["model_dir"],
+            league=self.league
         )
 
         stat_categories = ["points", "rebounds", "assists"]
@@ -169,26 +198,33 @@ class WalkForwardBacktester:
 
         for fold_name, f_data in fold_results.items():
             test_seasons_str = ",".join(f_data["fold_info"]["test_seasons"])
-            summary = f_data["summary"]
+            summary_list = f_data["summary"]
 
-            by_cat = summary.get("by_category", {})
-            for cat_name in ["Points", "Rebounds", "Assists"]:
-                if cat_name in by_cat:
-                    c_data = by_cat[cat_name]
-                    print(
-                        f"| {fold_name:<8} | {test_seasons_str:<12} | {cat_name:<12} | "
-                        f"{c_data['count']:<7} | {c_data['meta_mae']:<10.3f} | {c_data['ewma_mae']:<10.3f} | "
-                        f"{c_data['mae_improvement_pct']:>+10.2f}% | {c_data['crps']:<10.3f} |"
-                    )
+            # Display category stats
+            for c_data in summary_list:
+                cat = c_data["Category"]
+                if cat == "OVERALL":
+                    continue
+                
+                # Calculate improvement (EWMA MAE - Meta MAE) / EWMA MAE * 100
+                imp_pct = ((c_data["EWMA MAE"] - c_data["Meta MAE"]) / c_data["EWMA MAE"]) * 100 if c_data["EWMA MAE"] > 0 else 0.0
 
-            overall = summary.get("overall", {})
-            if overall:
                 print(
-                    f"| {fold_name:<8} | {test_seasons_str:<12} | {'OVERALL':<12} | "
-                    f"{overall.get('count', 0):<7} | {overall.get('meta_mae', 0.0):<10.3f} | "
-                    f"{overall.get('ewma_mae', 0.0):<10.3f} | {overall.get('mae_improvement_pct', 0.0):>+10.2f}% | "
-                    f"{overall.get('crps', 0.0):<10.3f} |"
+                    f"| {fold_name:<8} | {test_seasons_str:<12} | {cat:<12} | "
+                    f"{c_data['Count']:<7} | {c_data['Meta MAE']:<10.3f} | {c_data['EWMA MAE']:<10.3f} | "
+                    f"{imp_pct:>+10.2f}% | {c_data['Sim CRPS']:<10.3f} |"
                 )
+
+            # Display overall stats
+            for c_data in summary_list:
+                if c_data["Category"] == "OVERALL":
+                    imp_pct = ((c_data["EWMA MAE"] - c_data["Meta MAE"]) / c_data["EWMA MAE"]) * 100 if c_data["EWMA MAE"] > 0 else 0.0
+                    print(
+                        f"| {fold_name:<8} | {test_seasons_str:<12} | {'OVERALL':<12} | "
+                        f"{c_data['Count']:<7} | {c_data['Meta MAE']:<10.3f} | "
+                        f"{c_data['EWMA MAE']:<10.3f} | {imp_pct:>+10.2f}% | "
+                        f"{c_data['Sim CRPS']:<10.3f} |"
+                    )
             print(separator)
 
         print("#" * 105 + "\n")
@@ -226,6 +262,13 @@ def main():
         default=15,
         help="Number of nested Optuna trials if tuning_mode is nested_optuna",
     )
+    parser.add_argument(
+        "--league",
+        type=str,
+        default="NBA",
+        choices=["NBA", "WNBA"],
+        help="League to backtest (NBA or WNBA)",
+    )
 
     args = parser.parse_args()
 
@@ -235,6 +278,7 @@ def main():
         retrain=not args.no_retrain,
         tuning_mode=args.tuning_mode,
         inner_trials=args.inner_trials,
+        league=args.league,
     )
     backtester.run()
 

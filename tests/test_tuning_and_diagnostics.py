@@ -31,10 +31,10 @@ def test_vacated_usage_elasticity_calculation():
         {"game_id": 101, "start_time": "2025-11-01 19:00:00", "home_team_id": 1, "away_team_id": 2, "minutes_played": 34.0, "points": 25, "rebounds": 5, "assists": 6, "turnovers": 2, "steals": 1, "blocks": 0, "three_pointers_made": 2, "usage_rate": 0.25},
     ])
 
-    # Game 101: co_star_a played 2.0 mins (< 5 -> sidelined), co_star_b played 32.0 mins (active)
+    # Game 101: co_star_a recorded 0.0 mins (DNP -> pre-game ruled-out proxy), co_star_b played 32.0 mins (active)
     # Expected vacated_usage = 0.28 + 0.0 = 0.28
     mock_played_logs = [
-        (101, "co_star_a", 2.0),
+        (101, "co_star_a", 0.0),
         (101, "co_star_b", 32.0),
     ]
 

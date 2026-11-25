@@ -498,17 +498,11 @@ class ZINBModel:
         """
         if self.mu == 0 and self.pi == 1.0:
             return 0.0
-        domain = np.arange(0, 150)
         p = self.n / (self.n + self.mu)
-        nb_pmf = stats.nbinom.pmf(domain, self.n, p)
-        pmf = np.zeros(len(domain))
-        pmf[0] = self.pi + (1 - self.pi) * nb_pmf[0]
-        pmf[1:] = (1 - self.pi) * nb_pmf[1:]
-        cutoff = int(np.floor(line)) + 1
-        if cutoff >= len(domain):
-            return 0.0
-        prob_over = np.sum(pmf[cutoff:])
-        return float(prob_over)
+        cutoff = int(np.floor(line))
+        cdf = self.pi + (1 - self.pi) * stats.nbinom.cdf(cutoff, self.n, p)
+        prob_over = 1.0 - cdf
+        return float(max(0.0, min(1.0, prob_over)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -965,16 +959,25 @@ logger_mask = logging.getLogger('BetMaskingEngine')
 class BetMaskingEngine:
 
     @staticmethod
-    def mask_kelly_stake(raw_stake: float) -> int:
+    def mask_kelly_stake(raw_stake: float, league: str = "NBA") -> int:
         if raw_stake <= 0:
             return 0
-        if raw_stake < 50:
-            masked = round(raw_stake / 5) * 5
-        elif raw_stake <= 200:
-            masked = round(raw_stake / 10) * 10
+        from src.config import LEAGUE_CONFIG
+        league_key = league.upper() if league else "NBA"
+        max_limit = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["max_retail_bet_limit"]
+        
+        # Aggressively cap the raw stake at the league's max retail bet limit
+        capped_stake = min(float(raw_stake), float(max_limit))
+        
+        if capped_stake < 50:
+            masked = round(capped_stake / 5) * 5
+        elif capped_stake <= 200:
+            masked = round(capped_stake / 10) * 10
         else:
-            masked = round(raw_stake / 25) * 25
-        return max(int(masked), 5)
+            masked = round(capped_stake / 25) * 25
+            
+        masked = min(int(masked), int(max_limit))
+        return max(masked, 5) if max_limit >= 5 else int(max_limit)
 
     @staticmethod
     def generate_decoy_bet(ev_edge: float) -> dict:
@@ -1001,9 +1004,9 @@ class BetMaskingEngine:
 
 logger_bayes = logging.getLogger("BayesianPrior")
 
-def get_default_priors() -> dict:
+def get_default_priors(league: str = "NBA") -> dict:
     """Returns reasonable fallback positional priors (per 36 minutes)."""
-    return {
+    priors = {
         'points': {'PG': 18.0, 'SG': 17.0, 'SF': 16.0, 'PF': 15.5, 'C': 16.0},
         'rebounds': {'PG': 4.0, 'SG': 4.5, 'SF': 6.0, 'PF': 8.5, 'C': 10.5},
         'assists': {'PG': 6.5, 'SG': 4.0, 'SF': 3.5, 'PF': 2.5, 'C': 2.0},
@@ -1012,6 +1015,14 @@ def get_default_priors() -> dict:
         'blocks': {'PG': 0.3, 'SG': 0.5, 'SF': 0.8, 'PF': 1.5, 'C': 2.2},
         'three_pointers_made': {'PG': 2.5, 'SG': 2.8, 'SF': 2.2, 'PF': 1.5, 'C': 0.5}
     }
+    
+    if league == "WNBA":
+        # WNBA pace and scoring is roughly 72% of NBA. We scale the per-36 priors accordingly.
+        for stat, pos_dict in priors.items():
+            for pos in pos_dict:
+                priors[stat][pos] = round(priors[stat][pos] * 0.72, 2)
+                
+    return priors
 
 def calculate_positional_priors(box_scores_df: pd.DataFrame) -> dict:
     """
@@ -1446,14 +1457,17 @@ class MinuteSurvivalModel:
             logger.error(f'Failed to fit survival model: {e}')
             raise
 
-    def predict_expected_minutes(self, X_eval: pd.DataFrame) -> np.ndarray:
+    def predict_expected_minutes(self, X_eval: pd.DataFrame, league: str = "NBA") -> np.ndarray:
         """
-        Returns the expected minutes (area under the survival curve up to 48 mins).
+        Returns the expected minutes (area under the survival curve up to league regulation minutes).
         """
         if not self.is_fitted:
             return np.full(len(X_eval), 25.0)
+        from src.config import LEAGUE_CONFIG
+        league_key = league.upper() if league else "NBA"
+        reg_min = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["regulation_minutes"]
         survival_funcs = self.model.predict_survival_function(X_eval)
-        expected_mins = survival_funcs.loc[:48].sum().values
+        expected_mins = survival_funcs.loc[:int(reg_min)].sum().values
         return expected_mins
 
 

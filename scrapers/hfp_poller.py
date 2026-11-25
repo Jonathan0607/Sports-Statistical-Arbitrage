@@ -2,11 +2,11 @@
 High-Frequency Poller (HFP) — Master Diff-Engine Brain
 ========================================================
 Dual-Tier Scraping Architecture:
-  Tier 1 (Free/Retail): curl_cffi pollers for PrizePicks + Underdog Fantasy
+  Tier 1 (Free/Retail): curl_cffi poller for PrizePicks
   Tier 2 (Paid/Sharp):  Cached ParlayAPI for Pinnacle/DraftKings devigged lines
 
 Orchestration:
-  1. Every 30 seconds, poll PrizePicks and Underdog concurrently via asyncio.gather.
+  1. Poll PrizePicks regularly via asyncio.
   2. Load the latest devigged Pinnacle true_probs from sharp_cache.json.
   3. For every retail prop, diff against the sharp anchor.
   4. If ev_edge >= 5.0%, fire DiscordAlertEngine + cache signal in Redis.
@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.errors import RequestsError
 import psycopg2
 from dotenv import load_dotenv
 load_dotenv()
@@ -39,9 +40,10 @@ from src.execution import CorrelatedSlipEvaluator
 from src.utils import MarketDataLogger
 from infrastructure.entity_resolver import EntityResolver, clean_player_name
 from infrastructure.redis_client import RedisClient
+from src.config import LEAGUE_CONFIG
 
 # Import retail pollers and exchanges
-from scrapers.exchanges import UnderdogGhostClient, KalshiClobClient, PolymarketClobClient
+from scrapers.exchanges import KalshiClobClient, PolymarketClobClient
 
 # Import sharp line provider
 from scrapers.unified_api import SharpLineProvider
@@ -145,40 +147,74 @@ class UnifiedRestPoller:
     """
     Master Diff-Engine Brain for the Dual-Tier Scraping Architecture.
 
-    Orchestrates concurrent polling of PrizePicks and Underdog Fantasy (Retail),
+    Orchestrates polling of PrizePicks (Retail),
     loads devigged Pinnacle sharp lines from the cached ParlayAPI provider,
     and runs the EV diff engine to detect +EV opportunities and fire alerts.
     """
 
-    def __init__(self):
+    def __init__(self, leagues: list[str] = None, inference_url: str = None):
+        self.leagues = [lg.upper() for lg in (leagues or ["NBA", "WNBA"])]
+        raw_url = inference_url if inference_url is not None else os.getenv("INFERENCE_URL")
+        self.inference_url = raw_url.strip().rstrip("/") if raw_url and raw_url.strip() else None
+
         # ── Retail Book URLs ──────────────────────────────────
         self.pp_url = "https://api.prizepicks.com/projections"
 
+        # PrizePicks: iOS mobile app headers bypass DataDome WAF
+        # Key: DO NOT use browser Sec-Ch-Ua/Sec-Fetch headers or league_id param
+        self.pp_headers = {
+            "Accept": "application/json",
+            "Accept-Language": "en-US",
+            "User-Agent": "PrizePicks/3.50.0 (iPhone; iOS 18.0; Scale/3.00)",
+            "X-Device-Info": "iPhone15,3",
+        }
+        # Impersonation profile for PrizePicks (Safari iOS TLS fingerprint)
+        self.pp_impersonate = "safari17_0"
+
+        # Allow user to inject DataDome cookies/headers
+        pp_headers_path = "pp_headers.json"
+        if os.path.exists(pp_headers_path):
+            try:
+                with open(pp_headers_path, "r") as f:
+                    user_pp_headers = json.load(f)
+                    
+                    # If the user provides a browser User-Agent, we must clear the mobile headers!
+                    if "Mozilla" in user_pp_headers.get("User-Agent", ""):
+                        self.pp_headers = {
+                            "Accept": "application/json",
+                            "Accept-Language": "en-US,en;q=0.9",
+                            "Origin": "https://app.prizepicks.com",
+                            "Referer": "https://app.prizepicks.com/"
+                        }
+                    
+                    self.pp_headers.update(user_pp_headers)
+                logger.info("Loaded custom PrizePicks headers from pp_headers.json")
+            except Exception as e:
+                logger.error(f"Failed to load {pp_headers_path}: {e}")
+
+        # General headers for other services (Kalshi, Polymarket, etc.)
         self.headers = {
             "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
             "Accept-Language": "en-US,en;q=0.9",
-            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"macOS"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site",
-            "Referer": "https://app.prizepicks.com/",
-            "Origin": "https://app.prizepicks.com",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
+        # ── PP cached raw data for client-side league filtering ──
+        self._pp_raw_cache = None
+        self._pp_raw_cache_time = None
+        self._pp_cache_ttl = 45.0  # seconds — minimum interval between PP API hits
+
         # ── State tracking for diff engine ────────────────────
-        # Keyed by retail book: { 'pp': {prop_id: data}, 'ud': {prop_id: data}, 'kalshi': {prop_id: data}, 'polymarket': {prop_id: data} }
+        # Keyed by retail book: { 'pp': {prop_id: data}, 'kalshi': {prop_id: data}, 'polymarket': {prop_id: data} }
         self.last_state = {
             'pp': {},
-            'ud': {},
             'kalshi': {},
             'polymarket': {}
         }
 
         # ── Retail & Exchange Pollers ─────────────────────────
-        self.ud_client = UnderdogGhostClient()
         self.kalshi_client = KalshiClobClient()
         self.polymarket_client = PolymarketClobClient()
 
@@ -186,8 +222,7 @@ class UnifiedRestPoller:
         self.sharp_provider = SharpLineProvider()
         self.sharp_cache = {}  # In-memory sharp lines loaded each cycle
         self.anchors = {}      # Combined anchors mapping for each cycle
-        self.last_pp_fetch_time = None
-        self.last_ud_fetch_time = None
+        self.last_pp_fetch_time = {}
 
         # Force sync seed on startup if cache is missing or empty
         cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sharp_cache.json")
@@ -212,7 +247,7 @@ class UnifiedRestPoller:
         self.zinb_cache = {}
 
         # ── Discord Alerting Engine ───────────────────────────
-        self.min_ev_threshold = 5.0  # 5.0% minimum EV edge threshold
+        self.min_ev_threshold = 5.0  # Temporarily lowered to -5.0% for Discord testing
         self.discord_webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 
         # ── Database connectivity & Entity Resolution ─────────
@@ -274,7 +309,6 @@ class UnifiedRestPoller:
         
         self.locks = {
             'pp': asyncio.Lock(),
-            'ud': asyncio.Lock(),
             'kalshi': asyncio.Lock(),
             'polymarket': asyncio.Lock()
         }
@@ -415,7 +449,8 @@ class UnifiedRestPoller:
     async def get_player_history_async(self, player_id: str) -> pd.DataFrame:
         """Fetches historical box scores from the Redis In-Memory store in O(1) time."""
         try:
-            raw_data = await self.redis.json().get(f"player:history:{player_id}")
+            raw_data_str = await self.redis.get(f"player:history:{player_id}")
+            raw_data = json.loads(raw_data_str) if raw_data_str else None
             if raw_data:
                 df = pd.DataFrame(raw_data)
                 
@@ -432,11 +467,14 @@ class UnifiedRestPoller:
             logger.error(f"Redis feature store fetch error: {e}")
             return pd.DataFrame()
 
-    def project_player_baseline(self, history_df: pd.DataFrame, stat_col: str, player_id: str = None) -> float:
+    def project_player_baseline(self, history_df: pd.DataFrame, stat_col: str, player_id: str = None, league: str = "NBA") -> float:
         """
         Engineers shrunken rolling stat features and contextual features,
         then queries the preloaded model cluster to return the predicted target mean (mu) directly.
         """
+        league_key = league.upper() if league else "NBA"
+        reg_min = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["regulation_minutes"]
+
         if len(history_df) < 5:
             # Fallback to a simple historical mean or a baseline average
             if not history_df.empty:
@@ -445,7 +483,7 @@ class UnifiedRestPoller:
 
         try:
             from src.features import ContextualFeatureEngine
-            fe = ContextualFeatureEngine(db_uri=self.db_uri)
+            fe = ContextualFeatureEngine(db_uri=self.db_uri, league=league_key)
             
             # Enrich history with contextual features first
             df = fe.build_player_feature_matrix(player_id, history_df)
@@ -468,16 +506,16 @@ class UnifiedRestPoller:
             # Cumulative minutes played prior to the game (shift 1 so current game's minutes are excluded)
             df['cum_min'] = df['minutes_played'].shift(1).cumsum().fillna(0.0)
 
-            # Convert rolling stat per game to rolling stat per 36 mins
-            df['roll_stat_per_36'] = (df['roll_stat'] / (df['roll_min'] + 1e-5)) * 36
+            # Convert rolling stat per game to rolling stat per regulation mins
+            df['roll_stat_per_36'] = (df['roll_stat'] / (df['roll_min'] + 1e-5)) * reg_min
 
-            # Apply shrinkage to obtain Bayesian rolling stat per 36
+            # Apply shrinkage to obtain Bayesian rolling stat per regulation mins
             df['bayesian_roll_stat_per_36'] = df.apply(
                 lambda row: apply_bayesian_shrinkage(row['roll_stat_per_36'], row['cum_min'], prior_per_36, K=500.0),
                 axis=1
             )
             # Scale back to expected per-game value
-            df['bayesian_roll_stat'] = (df['bayesian_roll_stat_per_36'] / 36.0) * df['roll_min']
+            df['bayesian_roll_stat'] = (df['bayesian_roll_stat_per_36'] / reg_min) * df['roll_min']
 
             # Overwrite roll_stat with shrunken bayesian_roll_stat
             df['roll_stat'] = df['bayesian_roll_stat']
@@ -490,9 +528,9 @@ class UnifiedRestPoller:
 
             # Apply shrinkage to prediction features as well
             total_minutes = df['minutes_played'].sum()
-            pred_raw_per_36 = (last_3[stat_col].mean() / (last_3['minutes_played'].mean() + 1e-5)) * 36
+            pred_raw_per_36 = (last_3[stat_col].mean() / (last_3['minutes_played'].mean() + 1e-5)) * reg_min
             pred_bayesian_per_36 = apply_bayesian_shrinkage(pred_raw_per_36, total_minutes, prior_per_36, K=500.0)
-            pred_bayesian_stat = (pred_bayesian_per_36 / 36.0) * last_3['minutes_played'].mean()
+            pred_bayesian_stat = (pred_bayesian_per_36 / reg_min) * last_3['minutes_played'].mean()
 
             # Active/upcoming game contextual features
             active_polled_names = []
@@ -511,14 +549,30 @@ class UnifiedRestPoller:
 
             active_feats = fe.build_active_features(player_id, active_polled_player_ids=active_polled_ids)
 
+            # Domain Adaptation: Scale WNBA features to NBA equivalent distribution
+            if league_key == "WNBA":
+                min_scale = 48.0 / 40.0
+                pace_scale = 99.0 / 79.5
+                def_scale = 115.0 / 102.0
+                
+                scaled_bayesian_stat = pred_bayesian_stat * min_scale * pace_scale
+                scaled_mins = last_3['minutes_played'].mean() * min_scale
+                scaled_pace = active_feats["opp_pace_factor"] * pace_scale
+                scaled_def = active_feats["opp_def_rating"] * def_scale
+            else:
+                scaled_bayesian_stat = pred_bayesian_stat
+                scaled_mins = last_3['minutes_played'].mean()
+                scaled_pace = active_feats["opp_pace_factor"]
+                scaled_def = active_feats["opp_def_rating"]
+
             pred_features = np.array([[
-                last_3['minutes_played'].mean(),
-                pred_bayesian_stat,
+                scaled_mins,
+                scaled_bayesian_stat,
                 last_3['usage_rate'].mean(),
                 active_feats["days_rest"],
                 active_feats["is_back_to_back"],
-                active_feats["opp_def_rating"],
-                active_feats["opp_pace_factor"],
+                scaled_def,
+                scaled_pace,
                 active_feats.get("vacated_usage", active_feats.get("teammate_sidelined", 0.0))
             ]])
 
@@ -540,6 +594,11 @@ class UnifiedRestPoller:
                 return max(0.001, float(last_3[stat_col].mean()))
 
             predicted_mu = float(model.predict(pred_features)[0])
+            
+            # Domain Adaptation: Reverse the scaling back to WNBA domain
+            if league_key == "WNBA":
+                predicted_mu = predicted_mu / (min_scale * pace_scale)
+                
             return max(0.001, predicted_mu)
         except Exception as e:
             logger.error(f"XGBoost target projection error: {e}")
@@ -551,36 +610,96 @@ class UnifiedRestPoller:
     # RETAIL BOOK FETCHERS
     # ══════════════════════════════════════════════════════════
 
-    async def fetch_pp(self, session: AsyncSession) -> dict | None:
-        """Fetch PrizePicks unauthenticated projections."""
-        try:
-            params = {"league_id": "7", "per_page": "250"}
-            resp = await session.get(self.pp_url, params=params, headers=self.headers)
-            if resp.status_code == 200:
-                raw = resp.json()
-                return self._parse_pp(raw)
-            else:
-                logger.warning(f"PP API returned {resp.status_code}")
-                if resp.status_code in [403, 429]:
+    async def _fetch_pp_raw(self) -> dict | None:
+        """
+        Fetch ALL PrizePicks projections (no league_id filter) using iOS mobile
+        app headers + Safari TLS impersonation to bypass DataDome WAF.
+        Returns raw JSON or None on failure. Implements TTL caching to avoid
+        hitting the API more than once per cycle across leagues.
+        Retries up to 3 times with exponential backoff on transient failures.
+        """
+        now = datetime.now(timezone.utc)
+        if (self._pp_raw_cache is not None and self._pp_raw_cache_time is not None
+                and (now - self._pp_raw_cache_time).total_seconds() < self._pp_cache_ttl):
+            logger.debug("Using cached PP raw data (within TTL).")
+            return self._pp_raw_cache
+
+        # WAF-bypass: NO league_id parameter, iOS mobile UA, Safari TLS
+        params = {"per_page": "250"}
+
+        proxy_url = os.getenv("RESIDENTIAL_PROXY_URL")
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            # Anti-detection jitter (increases with each retry)
+            jitter = random.uniform(1.0, 3.0) * (attempt + 1)
+            await asyncio.sleep(jitter)
+
+            try:
+                async with AsyncSession(impersonate=self.pp_impersonate, proxies=proxies) as pp_session:
+                    resp = await pp_session.get(
+                        self.pp_url, headers=self.pp_headers, timeout=15.0
+                    )
+
+                if resp.status_code == 200:
+                    raw = resp.json()
+                    self._pp_raw_cache = raw
+                    self._pp_raw_cache_time = datetime.now(timezone.utc)
+                    # Reset TTL to default on success
+                    self._pp_cache_ttl = 45.0
+                    total = len(raw.get("data", []))
+                    logger.info(f"PP API returned 200 OK — {total} total projections fetched (attempt {attempt + 1}).")
+                    return raw
+                elif resp.status_code in [403, 429]:
                     self.rate_limited = True
-                return None
-        except Exception as e:
-            logger.error(f"PP fetch error: {e}")
-            return None
+                    # Exponential backoff on rate limiting — extend TTL to back off
+                    self._pp_cache_ttl = min(600.0, self._pp_cache_ttl * 2)
+                    logger.warning(
+                        f"PP API returned {resp.status_code} (attempt {attempt + 1}/{max_retries}). "
+                        f"TTL extended to {self._pp_cache_ttl:.0f}s."
+                    )
+                    if attempt < max_retries - 1:
+                        backoff = (2 ** attempt) * 10 + random.uniform(0, 5)
+                        logger.info(f"Backing off {backoff:.1f}s before PP retry...")
+                        await asyncio.sleep(backoff)
+                    continue
+                else:
+                    logger.warning(f"PP API returned {resp.status_code} (attempt {attempt + 1})")
+                    return None
+            except (RequestsError, Exception) as e:
+                logger.error(f"PP raw fetch error (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5.0 * (attempt + 1))
+                continue
 
-    async def fetch_ud(self, session: AsyncSession) -> dict | None:
-        """Fetch Underdog Fantasy lines via the ghost client."""
+        logger.error("PP raw fetch exhausted all retries.")
+        return None
+
+    async def fetch_pp(self, session: AsyncSession = None, league: str = "NBA") -> dict:
+        """
+        Fetch PrizePicks projections for a specific league.
+        Uses a single bulk fetch (no league_id to avoid WAF) and filters
+        client-side by the league_ppid attribute in each projection.
+        The `session` parameter is ignored — PP needs its own Safari session.
+        """
         try:
-            return await self.ud_client.fetch_current_lines(session)
-        except Exception as e:
-            logger.error(f"Underdog fetch error: {e}")
-            return None
+            raw = await self._fetch_pp_raw()
+            if raw is None:
+                return {}
+            return self._parse_pp(raw, league=league)
+        except (RequestsError, Exception) as e:
+            logger.error(f"PP fetch error: {e}")
+            return {}
 
-    def _parse_pp(self, raw: dict) -> dict:
-        """Extract odds from PP structure."""
+
+    def _parse_pp(self, raw: dict, league: str = "NBA") -> dict:
+        """Extract odds from PP structure, filtering by league_ppid attribute."""
         parsed = {}
         data = raw.get("data", [])
         included = raw.get("included", [])
+        league_key = league.upper() if league else "NBA"
+        target_pp_league = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["prizepicks_league_name"].upper()
 
         included_map = {}
         for item in included:
@@ -596,19 +715,47 @@ class UnifiedRestPoller:
             if attrs.get("player_combo", False):
                 continue
 
-            # Strict League Filter: Only allow NBA
-            league_rel = rels.get("league", {}).get("data", {})
-            league_attrs = included_map.get((league_rel.get("type"), league_rel.get("id")), {})
-            league_name = str(league_attrs.get("name", "")).strip().upper()
-            if league_name != "NBA":
-                continue
+            # 2. Client-side league filter using league_ppid (primary) or included map (fallback)
+            league_ppid = str(attrs.get("league_ppid", "")).strip().upper()
+            if league_ppid:
+                # Direct attribute-level filter (most reliable, avoids WAF league_id param)
+                if league_ppid != target_pp_league:
+                    continue
+            else:
+                # Fallback: resolve via included relationships map
+                league_rel = rels.get("league", {}).get("data", {})
+                league_attrs = included_map.get((league_rel.get("type"), league_rel.get("id")), {})
+                league_name = str(league_attrs.get("name") or attrs.get("league") or "").strip().upper()
+                if league_name != target_pp_league:
+                    continue
 
             player_rel = rels.get("new_player", {}).get("data", {})
             player_attrs = included_map.get((player_rel.get("type"), player_rel.get("id")), {})
             player_name = player_attrs.get("display_name") or player_attrs.get("name", "Unknown")
 
-            # 2. Hard string fallback check for combo props
+            # 3. Hard string fallback check for combo props
             if "+" in player_name:
+                continue
+
+            start_time_str = attrs.get("start_time")
+            if start_time_str:
+                from datetime import datetime, timezone
+                try:
+                    # PrizePicks format: "2026-10-20T15:10:00.000-04:00"
+                    st = datetime.fromisoformat(start_time_str)
+                    if st < datetime.now(timezone.utc):
+                        continue  # Skip live / in-game props
+                except Exception:
+                    pass
+
+            # 4. Strict filter for partial game / live props
+            desc = str(attrs.get("description", "")).lower()
+            prop_name = str(attrs.get("stat_display_name", "")).lower()
+            if any(x in desc or x in prop_name for x in ["1h", "2h", "1q", "2q", "3q", "4q", "half", "quarter", "1st", "2nd", "3rd", "4th", "live"]):
+                continue
+                
+            # 5. Skip promos (e.g. Taco Tuesday discounted lines that skew EV)
+            if attrs.get("is_promo") or attrs.get("flash_sale"):
                 continue
 
             if proj_id:
@@ -620,18 +767,21 @@ class UnifiedRestPoller:
                     'flash_sale': attrs.get("flash_sale", False),
                     'is_promo': attrs.get("is_promo", False),
                     'promo': attrs.get("promo", False),
-                    'start_time': attrs.get("start_time")
+                    'start_time': start_time_str
                 }
+        logger.info(f"Parsed {len(parsed)} {target_pp_league} props from PrizePicks.")
         return parsed
 
-    def apply_pace_elasticity(self, base_mu: float, base_pi: float, opp_pace: float, prop_type: str) -> tuple[float, float]:
+    def apply_pace_elasticity(self, base_mu: float, base_pi: float, opp_pace: float, prop_type: str, league: str = "NBA") -> tuple[float, float]:
         """
         Non-linearly scales expected distribution parameters based on opponent game pace.
         """
-        LEAGUE_AVERAGE_PACE = 99.0
+        league_key = league.upper() if league else "NBA"
+        LEAGUE_AVERAGE_PACE = 79.5 if league_key == "WNBA" else 99.0
+        min_pace = 70.0 if league_key == "WNBA" else 85.0
         
         # Safe fallback if opponent pace is missing or corrupted
-        valid_pace = max(opp_pace if opp_pace and not pd.isna(opp_pace) else LEAGUE_AVERAGE_PACE, 85.0)
+        valid_pace = max(opp_pace if opp_pace and not pd.isna(opp_pace) else LEAGUE_AVERAGE_PACE, min_pace)
         pace_ratio = valid_pace / LEAGUE_AVERAGE_PACE
         
         # Elasticity exponents: Points/Rebounds scale less directly than pure usage stats like Assists
@@ -648,19 +798,20 @@ class UnifiedRestPoller:
         
         return adj_mu, adj_pi
 
-    def calculate_theoretical_prob(self, player_name: str, stat_col: str, line: float, master_id: str = None, history_df: pd.DataFrame = None) -> tuple[float, ZINBModel]:
+    def calculate_theoretical_prob(self, player_name: str, stat_col: str, line: float, master_id: str = None, history_df: pd.DataFrame = None, league: str = "NBA") -> tuple[float, ZINBModel]:
         """
         Fits the Zero-Inflated Negative Binomial distribution to the pre-fetched historical baseline.
         """
+        league_key = league.upper() if league else "NBA"
         if not master_id:
-            for book_opt in ["PrizePicks", "Underdog", "Kalshi", "Polymarket"]:
+            for book_opt in ["PrizePicks", "Kalshi", "Polymarket"]:
                 master_id = self.resolver.resolve_player(book_opt, player_name)
                 if master_id:
                     break
             if not master_id:
                 master_id = player_name
 
-        cache_key = (master_id, stat_col)
+        cache_key = (master_id, stat_col, league_key)
         if cache_key in self.zinb_cache:
             zinb, pred = self.zinb_cache[cache_key]
             logger.debug(f"[{player_name}] Using cached ZINB and XGBoost baseline.")
@@ -672,7 +823,7 @@ class UnifiedRestPoller:
             zinb = ZINBModel()
 
             if not history_df.empty:
-                predicted_mu = self.project_player_baseline(history_df, stat_col, master_id)
+                predicted_mu = self.project_player_baseline(history_df, stat_col, master_id, league=league_key)
 
                 stat_series = history_df[stat_col]
                 zinb.fit(stat_series)
@@ -681,18 +832,15 @@ class UnifiedRestPoller:
                 zinb.mu = predicted_mu
                 logger.info(f"[{player_name}] ZINB mu set to direct XGBoost target prediction: {zinb.mu:.4f}")
             else:
-                logger.warning(f"No history for '{player_name}' (ID: {master_id}). Using fallback.")
-                zinb.mu = line
-                zinb.pi = 0.03
-                zinb.n = 15.0
-                predicted_mu = line
+                logger.warning(f"No history for '{player_name}' (ID: {master_id}). Skipping evaluation.")
+                raise ValueError(f"No historical data for {player_name}")
 
             self.zinb_cache[cache_key] = (zinb, predicted_mu)
 
         # Condition ZINB parameters using active opponent pace factor
         try:
             from src.features import ContextualFeatureEngine
-            fe = ContextualFeatureEngine(db_uri=self.db_uri)
+            fe = ContextualFeatureEngine(db_uri=self.db_uri, league=league_key)
             active_polled_names = []
             if hasattr(self, 'last_state'):
                 for b in self.last_state:
@@ -706,14 +854,14 @@ class UnifiedRestPoller:
                     if resolved_id:
                         active_polled_ids.append(resolved_id)
             active_feats = fe.build_active_features(master_id, active_polled_player_ids=active_polled_ids)
-            opp_pace = active_feats.get("opp_pace_factor", 99.0)
+            opp_pace = active_feats.get("opp_pace_factor", 79.5 if league_key == "WNBA" else 99.0)
         except Exception as e:
             logger.error(f"Failed to fetch active pace factor for ZINB conditioning: {e}")
-            opp_pace = 99.0
+            opp_pace = 79.5 if league_key == "WNBA" else 99.0
 
         # Apply pace elasticity adjustments to zinb.mu and zinb.pi
         prop_type = 'Assists' if stat_col.lower() == 'assists' else 'Other'
-        zinb.mu, zinb.pi = self.apply_pace_elasticity(zinb.mu, zinb.pi, opp_pace, prop_type)
+        zinb.mu, zinb.pi = self.apply_pace_elasticity(zinb.mu, zinb.pi, opp_pace, prop_type, league=league)
 
         # Call condition_parameters with pace_factor=1.0 since pace scaling is handled by apply_pace_elasticity
         zinb.condition_parameters(blowout_risk=0.10, pace_factor=1.0)
@@ -721,43 +869,114 @@ class UnifiedRestPoller:
         prob_over = zinb.predict_over_probability(line)
         return prob_over, zinb
 
+    async def predict_via_http(
+        self,
+        player_name: str,
+        stat_col: str,
+        line: float,
+        master_id: str = None,
+        history_df: pd.DataFrame = None,
+        league: str = "NBA",
+    ) -> tuple[float, ZINBModel]:
+        """Calls the external FastAPI /v1/predict service over HTTP via httpx.AsyncClient."""
+        import httpx
+        from src.feature_contract import FEATURE_SCHEMA_VERSION, STAT_COL_TO_TARGET
+
+        league_key = league.upper() if league else "NBA"
+        pid = str(master_id or player_name)
+        stat_key = STAT_COL_TO_TARGET.get(stat_col.lower().strip(), "pts")
+
+        history_records = None
+        if history_df is not None and not history_df.empty:
+            allowed_cols = {
+                "game_id", "start_time", "season", "home_team_id", "away_team_id",
+                "team_id", "opponent_team_id", "minutes_played", "points", "rebounds",
+                "assists", "turnovers", "steals", "blocks", "three_pointers_made",
+                "field_goals_attempted", "free_throws_attempted", "plus_minus",
+                "usage_rate", "potential_assists", "touches", "passes_made",
+                "time_of_possession_sec", "avg_defender_distance_ft", "shorthanded_points",
+            }
+            history_records = []
+            for idx, row in history_df.iterrows():
+                rec = {"game_id": int(row.get("game_id", idx) or idx), "start_time": str(row.get("start_time", "2026-01-01T00:00:00Z"))}
+                for k, v in row.items():
+                    if k in allowed_cols and k not in ("game_id", "start_time") and pd.notna(v):
+                        rec[k] = float(v) if isinstance(v, (int, float, np.number)) else v
+                if "minutes_played" in rec:
+                    history_records.append(rec)
+
+        payload = {
+            "schema_version": FEATURE_SCHEMA_VERSION,
+            "requests": [
+                {
+                    "schema_version": FEATURE_SCHEMA_VERSION,
+                    "league": league_key,
+                    "stat": stat_key,
+                    "player_id": pid,
+                    "history_logs": history_records,
+                    "thresholds": [float(line)],
+                }
+            ],
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{self.inference_url}/v1/predict", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+        pred = data["predictions"][0]
+        zinb = ZINBModel()
+        zinb.mu = float(pred["zinb"]["mu"])
+        zinb.n = float(pred["zinb"]["n_nb"])
+        zinb.pi = float(pred["zinb"]["zero_inflation_prob"])
+        prob_over = float(pred["survival_probabilities"][0]["prob_over"])
+        return prob_over, zinb
+
     # ══════════════════════════════════════════════════════════
     # DIFF ENGINE (Core EV Detection)
     # ══════════════════════════════════════════════════════════
 
-    async def _diff_engine(self, book: str, new_state: dict):
+    async def _diff_engine(self, book: str, new_state: dict, league: str = "NBA"):
         """
         Compares new state with last state, generates Synthetic Ticks,
         runs the full ZINB/XGBoost model pipeline, and alerts on +EV.
         """
+        league_key = league.upper() if league else "NBA"
+        state_key = book if league_key == "NBA" else f"{book}_{league_key.lower()}"
+        if book not in self.locks:
+            self.locks[book] = asyncio.Lock()
+
         async with self.locks[book]:
-            redis_key = f"board:state:{book}"
+            redis_key = f"board:state:{book}" if league_key == "NBA" else f"board:state:{book}:{league_key.lower()}"
             try:
-                redis_state = await self.redis.json().get(redis_key)
+                redis_state_str = await self.redis.get(redis_key)
+                redis_state = json.loads(redis_state_str) if redis_state_str else None
                 if redis_state is None:
-                    redis_state = self.last_state[book]
+                    redis_state = self.last_state.get(state_key, self.last_state.get(book, {}))
             except Exception as e:
-                logger.error(f"Error fetching state from Redis for {book}: {e}")
-                redis_state = self.last_state[book]
+                logger.error(f"Error fetching state from Redis for {book} ({league_key}): {e}")
+                redis_state = self.last_state.get(state_key, self.last_state.get(book, {}))
 
             old_state = redis_state
             ticks = []
 
             if not old_state:
-                self.last_state[book] = new_state
+                self.last_state[state_key] = new_state
                 try:
-                    await self.redis.json().set(redis_key, "$", new_state)
+                    await self.redis.set(redis_key, json.dumps(new_state))
                 except Exception as e:
-                    logger.error(f"Error setting initial state in Redis for {book}: {e}")
-                logger.info(f"Seeded initial state for {book} ({len(new_state)} props)")
-                return ticks
-
+                    logger.error(f"Error setting initial state in Redis for {book} ({league_key}): {e}")
+                logger.info(f"Seeded initial state for {book} [{league_key}] ({len(new_state)} props). Force-evaluating initial board...")
+                old_state = {}  # Treat all as new so they get evaluated
             for prop_id, new_data in new_state.items():
                 # Explicitly clear loop context variables to prevent async reuse/leakage
                 current_player_raw = None
                 master_id = None
                 theoretical_prob = None
                 zinb = None
+
+                if prop_id not in old_state:
+                    # Inject dummy state so new lines are always evaluated as "ticks"
+                    old_state[prop_id] = {"_is_new": True}
 
                 if prop_id in old_state:
                     old_data = old_state[prop_id]
@@ -781,11 +1000,13 @@ class UnifiedRestPoller:
                         }
                         ticks.append(tick)
 
-                        print(f"\n{'='*60}")
-                        print(f" 🚨 SYNTHETIC TICK | {book.upper()} | {current_player_raw} - {new_data['prop']}")
-                        print(f"{'='*60}")
-                        print(f" Old: {old_data}")
-                        print(f" New: {new_data}\n")
+                        # Only print SYNTHETIC TICK banner if it's actually a physical move, not just a new line
+                        if "_is_new" not in old_data:
+                            print(f"\n{'='*60}")
+                            print(f" 🚨 SYNTHETIC TICK | {book.upper()} | {current_player_raw} - {new_data['prop']}")
+                            print(f"{'='*60}")
+                            print(f" Old: {old_data}")
+                            print(f" New: {new_data}\n")
 
                         # Extract line value
                         raw_line = float(new_data.get('line', 15.5) or 15.5)
@@ -815,24 +1036,41 @@ class UnifiedRestPoller:
                         matching_anchors = available_stat_lines.get(matching_line_key, {}) if matching_line_key is not None else {}
 
                         # Resolve player name to database master ID
-                        mapped_book = "PrizePicks" if book == 'pp' else "Underdog" if book == 'ud' else "Kalshi" if book == 'kalshi' else "Polymarket"
+                        mapped_book = "PrizePicks" if book == 'pp' else "Kalshi" if book == 'kalshi' else "Polymarket"
                         master_id = self.resolver.resolve_player(mapped_book, current_player_raw)
 
                         # --- NEW: Fetch from Redis in micro-seconds ---
                         history_df = await self.get_player_history_async(master_id)
 
-                        # Pass the DataFrame directly into the thread to avoid blocking I/O
-                        theoretical_prob, zinb = await asyncio.to_thread(
-                            self.calculate_theoretical_prob,
-                            current_player_raw,
-                            stat_col,
-                            raw_line,
-                            master_id,
-                            history_df
-                        )
+                        try:
+                            if self.inference_url:
+                                theoretical_prob, zinb = await self.predict_via_http(
+                                    current_player_raw,
+                                    stat_col,
+                                    raw_line,
+                                    master_id,
+                                    history_df,
+                                    league=league_key,
+                                )
+                            else:
+                                # Pass the DataFrame directly into the thread to avoid blocking I/O
+                                theoretical_prob, zinb = await asyncio.to_thread(
+                                    self.calculate_theoretical_prob,
+                                    current_player_raw,
+                                    stat_col,
+                                    raw_line,
+                                    master_id,
+                                    history_df
+                                )
+                        except ValueError as e:
+                            logger.warning(f"Skipping prop due to missing data: {e}")
+                            continue
+                        except Exception as e:
+                            logger.error(f"Error calculating theoretical probability for {current_player_raw}: {e}")
+                            continue
 
                         # Determine target cost/probability and american odds based on book/odds_type
-                        if book in ('pp', 'ud'):
+                        if book == 'pp':
                             # Standard DFS implied cost/odds (-119)
                             target_yes_american = -119
                             target_no_american = -119
@@ -844,10 +1082,7 @@ class UnifiedRestPoller:
                             target_no_prob = 1.0 - float(new_data.get('yes_bid', 0.0))
                             target_yes_american = self._prob_to_american(target_yes_prob)
                             target_no_american = self._prob_to_american(target_no_prob)
-                        else:
-                            continue
-
-                        MIN_LIQUIDITY_USD = 100.00
+                        MIN_LIQUIDITY_USD = LEAGUE_CONFIG.get(league_key, LEAGUE_CONFIG["NBA"])["min_anchor_liquidity"]
 
                         # 1. Gather all candidate exchange anchors (excluding the target book itself)
                         exchange_candidates = []
@@ -977,7 +1212,8 @@ class UnifiedRestPoller:
                                     zinb_mu=zinb.mu,
                                     zinb_pi=zinb.pi,
                                     zinb_n=zinb.n,
-                                    anchor_liquidity_usd=anchor_liquidity_usd
+                                    anchor_liquidity_usd=anchor_liquidity_usd,
+                                    league=league_key
                                 )
                                 
                         # ── Evaluation 2: NO / Under Contract ─────────────────
@@ -1040,14 +1276,15 @@ class UnifiedRestPoller:
                                     zinb_mu=zinb.mu,
                                     zinb_pi=zinb.pi,
                                     zinb_n=zinb.n,
-                                    anchor_liquidity_usd=anchor_liquidity_usd
+                                    anchor_liquidity_usd=anchor_liquidity_usd,
+                                    league=league_key
                                 )
 
-            self.last_state[book] = new_state
+            self.last_state[state_key] = new_state
             try:
-                await self.redis.json().set(redis_key, "$", new_state)
+                await self.redis.set(redis_key, json.dumps(new_state))
             except Exception as e:
-                logger.error(f"Error saving state to Redis for {book}: {e}")
+                logger.error(f"Error saving state to Redis for {book} ({league_key}): {e}")
             return ticks
 
     def _prob_to_american(self, prob: float) -> int:
@@ -1070,9 +1307,11 @@ class UnifiedRestPoller:
 
     async def _fire_alert_and_save(self, book, player_name, player_id, prop_name, side, raw_line,
                                    sharp_book, sharp_line, sharp_prob, target_cost, target_american,
-                                   ev_edge, kelly_fraction, zinb_mu, zinb_pi, zinb_n, anchor_liquidity_usd=None):
+                                   ev_edge, kelly_fraction, zinb_mu, zinb_pi, zinb_n, anchor_liquidity_usd=None,
+                                   league="NBA"):
         """Dispatches alerts, caches signals in Redis, and stores in Postgres database."""
-        mapped_book = "PrizePicks" if book == 'pp' else "Underdog" if book == 'ud' else "Kalshi" if book == 'kalshi' else "Polymarket"
+        league_key = (league or "NBA").upper()
+        mapped_book = "PrizePicks" if book == 'pp' else "Kalshi" if book == 'kalshi' else "Polymarket"
         
         # --- FIX: Standardize the prop name for the cache key ---
         standardized_prop = self._map_stat_type(prop_name) or prop_name
@@ -1080,7 +1319,8 @@ class UnifiedRestPoller:
         # State-Aware Smart Cache check
         import time
         current_time = time.time()
-        alert_key = f"{player_name}_{standardized_prop}_{side}_{mapped_book}"
+        base_alert_key = f"{player_name}_{standardized_prop}_{side}_{mapped_book}"
+        alert_key = base_alert_key if league_key == "NBA" else f"{league_key}_{base_alert_key}"
         last_state = getattr(self, 'smart_alert_cache', {}).get(alert_key)
         
         if last_state:
@@ -1109,12 +1349,12 @@ class UnifiedRestPoller:
 
         # 1. Fire Discord Alert
         raw_stake = kelly_fraction * 50000.0
-        masked_stake = BetMaskingEngine.mask_kelly_stake(raw_stake)
+        masked_stake = BetMaskingEngine.mask_kelly_stake(raw_stake, league=league_key)
 
-        logger.info(f"+EV {side} edge ({ev_edge*100.0:.2f}%) on {mapped_book} crosses threshold. Firing alert...")
+        logger.info(f"+EV [{league_key}] {side} edge ({ev_edge*100.0:.2f}%) on {mapped_book} crosses threshold. Firing alert...")
         
         logger.info(
-            f"Alert Event: player={player_name}, prop={prop_name}, "
+            f"Alert Event: league={league_key}, player={player_name}, prop={prop_name}, "
             f"sharp_book={sharp_book}, retail_book={mapped_book}, "
             f"retail_line={retail_line}, ev_edge={ev_edge:.2%}, "
             f"masked_stake=${float(masked_stake):.2f}, "
@@ -1133,17 +1373,26 @@ class UnifiedRestPoller:
             "sharp_book": sharp_book,
             "sharp_line": sharp_line,
             "anchor_liquidity_usd": anchor_liquidity_usd,
+            "league": league_key,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
-        # Non-blocking push to the memory queue
-        self.alert_queue.put_nowait(alert_payload)
-        logger.info(f"Buffered +EV single-leg alert for {player_name} to internal queue.")
+        # Temporal Camouflage (Steam Chasing Prevention)
+        async def delay_alert(payload, delay):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self.alert_queue.put_nowait(payload)
+            logger.info(f"Buffered +EV single-leg alert for {payload['player']} to internal queue.")
+
+        import random
+        import asyncio
+        delay = random.lognormvariate(mu=2.8, sigma=0.4) if book == 'pp' else 0
+        asyncio.create_task(delay_alert(alert_payload, delay))
 
 
         # 2. Cache in Redis
         try:
-            signal_key = f"signal:{book}:{player_name}:{prop_name}:{side}"
+            signal_key = f"signal:{book}:{player_name}:{prop_name}:{side}" if league_key == "NBA" else f"signal:{league_key}:{book}:{player_name}:{prop_name}:{side}"
             await self.redis.hset(signal_key, mapping={
                 "Player": player_name,
                 "Market": prop_name,
@@ -1160,6 +1409,7 @@ class UnifiedRestPoller:
                 "ZINB_pi": str(zinb_pi),
                 "ZINB_n": str(zinb_n),
                 "Anchor Liquidity USD": str(anchor_liquidity_usd) if anchor_liquidity_usd is not None else "",
+                "League": league_key,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
             await self.redis.expire(signal_key, 300)
@@ -1182,7 +1432,8 @@ class UnifiedRestPoller:
             "stale_under_odds": stale_odds,
             "expected_value": ev_edge,
             "kelly_fraction": kelly_fraction,
-            "anchor_liquidity_usd": anchor_liquidity_usd
+            "anchor_liquidity_usd": anchor_liquidity_usd,
+            "league": league_key
         }
         
         try:
@@ -1474,13 +1725,21 @@ class UnifiedRestPoller:
     # MASTER ORCHESTRATION LOOP
     # ══════════════════════════════════════════════════════════
 
-    async def poll_markets(self):
+    async def poll_markets(self, league: str = None):
         """
         Master polling cycle:
-          1. Load latest sharp lines from cache (Tier 2).
-          2. Fetch PrizePicks, Underdog, Kalshi, and Polymarket concurrently.
-          3. Run diff engine on all feeds.
+          1. If league is None, iterates over all configured leagues (e.g. ['NBA', 'WNBA']).
+          2. Load latest sharp lines from cache (Tier 2).
+          3. Fetch PrizePicks, Kalshi, and Polymarket concurrently.
+          4. Run diff engine on all feeds.
         """
+        if league is None:
+            for target_lg in self.leagues:
+                await self.poll_markets(league=target_lg)
+            return
+
+        target_league = league.upper()
+
         # Step 1: Load sharp cache (non-blocking, reads local file)
         try:
             self.sharp_cache = await self.sharp_provider.get_sharp_lines()
@@ -1492,79 +1751,65 @@ class UnifiedRestPoller:
         # Step 2: Fetch all books concurrently
         proxy_url = os.getenv("RESIDENTIAL_PROXY_URL")
         proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        fingerprint = random.choice(["chrome110", "chrome116", "chrome120", "edge101", "safari15_5"])
+        # General session for Kalshi and Polymarket (Chrome TLS profile)
+        fingerprint = "chrome120"
 
         async with AsyncSession(impersonate=fingerprint, proxies=proxies) as session:
-            logger.info("Fetching all books concurrently (PrizePicks + Underdog + Kalshi + Polymarket)...")
+            logger.info(f"Fetching all books concurrently [{target_league}] (PrizePicks + Kalshi + Polymarket)...")
             
             now = datetime.now(timezone.utc)
             interval_seconds = self._calculate_dynamic_interval()
             interval_minutes = interval_seconds / 60.0
             
-            # Throttled fetches for PP and Underdog (dynamic interval check)
+            # Throttled fetches for PP (dynamic interval check per league)
             pp_coro_or_val = None
-            if self.last_pp_fetch_time is None or (now - self.last_pp_fetch_time).total_seconds() >= interval_seconds:
-                logger.info(f"Scheduling PrizePicks API network fetch (dynamic interval of {interval_minutes:.1f} minutes elapsed)...")
-                pp_coro_or_val = self.fetch_pp(session)
+            last_pp = self.last_pp_fetch_time.get(target_league)
+            if last_pp is None or (now - last_pp).total_seconds() >= interval_seconds:
+                logger.info(f"Scheduling PrizePicks API network fetch [{target_league}] (dynamic interval of {interval_minutes:.1f} minutes elapsed)...")
+                pp_coro_or_val = self.fetch_pp(session, league=target_league)
             else:
-                logger.info(f"Using cached PrizePicks state to respect {interval_minutes:.1f}-minute dynamic IP protection interval.")
+                logger.info(f"Using cached PrizePicks state [{target_league}] to respect {interval_minutes:.1f}-minute dynamic IP protection interval.")
                 
-            ud_coro_or_val = None
-            if self.last_ud_fetch_time is None or (now - self.last_ud_fetch_time).total_seconds() >= interval_seconds:
-                logger.info(f"Scheduling Underdog API network fetch (dynamic interval of {interval_minutes:.1f} minutes elapsed)...")
-                ud_coro_or_val = self.fetch_ud(session)
-            else:
-                logger.info(f"Using cached Underdog state to respect {interval_minutes:.1f}-minute dynamic IP protection interval.")
 
             # Prepare tasks or pre-fetched values
             tasks = []
             task_indices = {}
             
-            # Kalshi and Polymarket are fetched every cycle
-            tasks.append(self.kalshi_client.fetch_current_lines(session))
-            task_indices['kalshi'] = len(tasks) - 1
-            
-            tasks.append(self.polymarket_client.fetch_current_lines(session))
-            task_indices['polymarket'] = len(tasks) - 1
+            # Kalshi and Polymarket are queried for NBA
+            if target_league == "NBA":
+                tasks.append(self.kalshi_client.fetch_current_lines(session))
+                task_indices['kalshi'] = len(tasks) - 1
+                
+                tasks.append(self.polymarket_client.fetch_current_lines(session))
+                task_indices['polymarket'] = len(tasks) - 1
             
             if pp_coro_or_val is not None:
                 tasks.append(pp_coro_or_val)
                 task_indices['pp'] = len(tasks) - 1
             
-            if ud_coro_or_val is not None:
-                tasks.append(ud_coro_or_val)
-                task_indices['ud'] = len(tasks) - 1
                 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
             
             # Map results back
-            kalshi_data = results[task_indices['kalshi']]
-            polymarket_data = results[task_indices['polymarket']]
+            kalshi_data = results[task_indices['kalshi']] if 'kalshi' in task_indices else {}
+            polymarket_data = results[task_indices['polymarket']] if 'polymarket' in task_indices else {}
             
-            if pp_coro_or_val is not None:
+            state_key_pp = f"pp_{target_league.lower()}"
+
+            if pp_coro_or_val is not None and 'pp' in task_indices:
                 pp_data = results[task_indices['pp']]
             else:
-                pp_data = self.last_state.get('pp', {})
+                pp_data = self.last_state.get(state_key_pp, self.last_state.get('pp', {}))
                 
-            if ud_coro_or_val is not None:
-                ud_data = results[task_indices['ud']]
-            else:
-                ud_data = self.last_state.get('ud', {})
 
             # Handle exceptions gracefully
             if isinstance(pp_data, Exception) or pp_data is None:
-                logger.error(f"Error fetching PrizePicks: {pp_data}")
-                pp_data = self.last_state.get('pp', {})
+                logger.error(f"Error fetching PrizePicks [{target_league}]: {pp_data}")
+                pp_data = self.last_state.get(state_key_pp, self.last_state.get('pp', {}))
             else:
                 if pp_coro_or_val is not None:
-                    self.last_pp_fetch_time = now
+                    self.last_pp_fetch_time[target_league] = now
 
-            if isinstance(ud_data, Exception) or ud_data is None:
-                logger.error(f"Error fetching Underdog: {ud_data}")
-                ud_data = self.last_state.get('ud', {})
-            else:
-                if ud_coro_or_val is not None:
-                    self.last_ud_fetch_time = now
 
             if isinstance(kalshi_data, Exception) or kalshi_data is None:
                 logger.error(f"Error fetching Kalshi: {kalshi_data}")
@@ -1575,22 +1820,23 @@ class UnifiedRestPoller:
                 polymarket_data = self.last_state.get('polymarket', {})
 
             logger.info(
-                f"Retrieved PP: {len(pp_data)} | UD: {len(ud_data)} | "
+                f"[{target_league}] Retrieved PP: {len(pp_data)} | "
                 f"Kalshi: {len(kalshi_data)} | Polymarket: {len(polymarket_data)} props"
             )
 
             # Build in-memory anchors mapping for the current cycle
             self._build_anchors(kalshi_data, polymarket_data)
 
-            # Step 3: Run diff engine on all feeds
-            await self._diff_engine('pp', pp_data)
-            await self._diff_engine('ud', ud_data)
+            # Step 3: Run diff engine on all feeds with league context
+            await self._diff_engine('pp', pp_data, league=target_league)
 
             # Flatten 3D exchange states before sending to 1D diff engine
-            flat_kalshi = self._flatten_3d_state(kalshi_data)
-            flat_polymarket = self._flatten_3d_state(polymarket_data)
-            await self._diff_engine('kalshi', flat_kalshi)
-            await self._diff_engine('polymarket', flat_polymarket)
+            if kalshi_data:
+                flat_kalshi = self._flatten_3d_state(kalshi_data)
+                await self._diff_engine('kalshi', flat_kalshi, league=target_league)
+            if polymarket_data:
+                flat_polymarket = self._flatten_3d_state(polymarket_data)
+                await self._diff_engine('polymarket', flat_polymarket, league=target_league)
 
     async def start_snapshot_loop(self):
         """Asynchronously triggers MarketDataLogger.log_snapshot() every 5 minutes (300 seconds)."""
@@ -1626,13 +1872,14 @@ class UnifiedRestPoller:
             logger.error(f"Failed to update walk-forward logger status: {e}")
 
 
-async def main():
-    poller = UnifiedRestPoller()
+async def main(inference_url: str = None):
+    poller = UnifiedRestPoller(leagues=["NBA", "WNBA"], inference_url=inference_url)
 
     print("\n" + "=" * 60)
     print(" HIGH-FREQUENCY POLLER (HFP) — DUAL-TIER ARCHITECTURE")
     print("=" * 60)
-    print(" Tier 1 (Retail): PrizePicks + Underdog Fantasy (15s cycle)")
+    print(" Leagues Monitored: " + ", ".join(poller.leagues))
+    print(" Tier 1 (Retail): PrizePicks (15s cycle)")
     print(" Tier 2 (Sharp):  Pinnacle/DK (45-min cache) + Kalshi + Polymarket")
     print("=" * 60 + "\n")
 
@@ -1642,14 +1889,18 @@ async def main():
     cycle = 0
     while True:
         cycle += 1
-        print(f"\n>>> Cycle {cycle}: Polling markets...")
-        await poller.poll_markets()
+        for league in poller.leagues:
+            print(f"\n>>> Cycle {cycle} [{league}]: Polling {league} markets...")
+            await poller.poll_markets(league=league)
 
+        pp_count = len(poller.last_state.get('pp', {})) + len(poller.last_state.get('pp_wnba', {}))
+        kalshi_count = len(poller.last_state.get('kalshi', {}))
+        poly_count = len(poller.last_state.get('polymarket', {}))
+        
         print(f"\n{'─'*60}")
-        print(f" PrizePicks Props Monitored:  {len(poller.last_state['pp'])}")
-        print(f" Underdog Props Monitored:    {len(poller.last_state['ud'])}")
-        print(f" Kalshi Props Monitored:      {len(poller.last_state['kalshi'])}")
-        print(f" Polymarket Props Monitored:  {len(poller.last_state['polymarket'])}")
+        print(f" PrizePicks Props Monitored:  {pp_count}")
+        print(f" Kalshi Props Monitored:      {kalshi_count}")
+        print(f" Polymarket Props Monitored:  {poly_count}")
         print(f" Sharp Cache Players Loaded:  {len(poller.sharp_cache)}")
         print(f"{'─'*60}")
 
@@ -1666,4 +1917,14 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+
+    parser = argparse.ArgumentParser(description="High-Frequency Poller (HFP)")
+    parser.add_argument(
+        "--inference-url",
+        type=str,
+        default=os.getenv("INFERENCE_URL"),
+        help="Optional FastAPI inference service base URL (e.g., http://localhost:8000)",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(inference_url=args.inference_url))

@@ -1,136 +1,136 @@
 # src/train_global_model.py
-import os
-import sys
 import json
 import logging
-import pandas as pd
+import os
+import sys
+
+import lightgbm as lgb
 import numpy as np
+import optuna
+import pandas as pd
+import scipy.stats as stats
 import sqlalchemy
 import xgboost as xgb
-import lightgbm as lgb
+from dotenv import load_dotenv
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import TimeSeriesSplit
-from dotenv import load_dotenv
-import optuna
-import scipy.stats as stats
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.feature_contract import (
+    CATEGORICAL_ID_COLUMNS,
+    FEATURE_COLUMNS,
+    FEATURE_SCHEMA_VERSION,
+    PLAYER_TIERS,
+    TARGET_METRICS,
+    TIER_ORDER,
+    WNBA_FEATURE_COLUMNS,
+    assign_player_tier,
+    compute_causal_player_features,
+    compute_target_rolling_features,
+    get_active_feature_columns,
+    get_tier_alpha,
+    prepare_xgb_lgb_frames,
+)
 from src.features import ContextualFeatureEngine
-from src.models import get_positional_prior, apply_bayesian_shrinkage
+from src.models import apply_bayesian_shrinkage, get_default_priors, get_positional_prior
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TrainGlobalModels")
 
-TARGET_METRICS = {
-    'pts': 'points',
-    'reb': 'rebounds',
-    'ast': 'assists',
-    'fg3m': 'three_pointers_made',
-    'stl': 'steals',
-    'blk': 'blocks',
-    'tov': 'turnovers'
-}
 
-FEATURE_COLUMNS = [
-    'roll_min', 'roll_stat', 'roll_usg',
-    'days_rest', 'is_back_to_back', 'opp_def_rating', 'opp_pace_factor',
-    'opp_pos_pts_allowed', 'vacated_usage',
-    'roll_potential_assists', 'roll_touches', 'roll_passes_made',
-    'roll_time_of_possession_sec', 'roll_defender_distance',
-    'is_home_game', 'pace_differential', 'roll_stat_var', 'roll_residual',
-    'roll_ts_pct', 'roll_reb_rate', 'roll_ast_rate', 'roll_shorthanded_points',
-    'roll_plus_minus', 'roll_usg_efficiency',
-    'player_id', 'team_id', 'opponent_team_id'
-]
+def _iter_grouped_time_splits(df: pd.DataFrame, n_splits: int = 5):
+    """Yields expanding-window (train_idx, val_idx) splits grouped by timestamp to avoid intra-day leakage."""
+    if "start_time" not in df.columns or df["start_time"].nunique() <= n_splits:
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        yield from tscv.split(df)
+        return
+
+    unique_times = np.sort(df["start_time"].unique())
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    time_series = df["start_time"].to_numpy()
+    for train_t_idx, val_t_idx in tscv.split(unique_times):
+        train_times = set(unique_times[train_t_idx])
+        val_times = set(unique_times[val_t_idx])
+        train_idx = np.flatnonzero(np.isin(time_series, list(train_times)))
+        val_idx = np.flatnonzero(np.isin(time_series, list(val_times)))
+        if len(train_idx) > 0 and len(val_idx) > 0:
+            yield train_idx, val_idx
 
 
 def train_global_ensemble(
     target_keys: list = None,
     config_path: str = "config/stat_hyperparameters.json",
     train_seasons: list = None,
-    model_dir: str = "models"
+    model_dir: str = "models",
+    league: str = "NBA",
 ):
     """
-    Trains a Meta-Ensemble (Stacking) predictive layer across all target statistics:
+    Trains a Meta-Ensemble (Stacking) predictive layer across target statistics:
     1. Base Model 1: XGBoost Regressor
     2. Base Model 2: LightGBM Regressor
-    3. Meta-Learner: Ridge Regression (alpha=1.0) trained on out-of-fold (OOF)
-       predictions from a 5-split TimeSeriesSplit cross-validation loop.
-    4. Distributional Calibration: Optuna finds optimal Negative Binomial dispersion (alpha).
+    3. Meta-Learner: Ridge Regression (alpha=1.0) trained on date-grouped OOF predictions
+    4. Distributional Calibration: Optuna finds optimal NB dispersion (alpha) strictly on OOF residuals.
     """
     load_dotenv()
     db_uri = os.getenv("POSTGRES_URI", "postgresql://postgres:password@localhost:5432/sports_db")
     if db_uri.startswith("postgres://"):
         db_uri = db_uri.replace("postgres://", "postgresql+psycopg2://", 1)
-        
+
     logger.info(f"Connecting to database: {db_uri}")
     engine = sqlalchemy.create_engine(db_uri)
-    fe = ContextualFeatureEngine(db_uri=db_uri)
-    
+    fe = ContextualFeatureEngine(db_uri=db_uri, league=league)
+
     logger.info("Extracting unique player IDs from PostgreSQL...")
     with engine.connect() as conn:
-        res = conn.execute(sqlalchemy.text("SELECT DISTINCT player_id FROM player_game_logs")).fetchall()
+        if train_seasons:
+            stmt = sqlalchemy.text(
+                "SELECT DISTINCT g.player_id FROM player_game_logs g "
+                "JOIN games gm ON g.game_id = gm.game_id "
+                "WHERE gm.sport = :league AND gm.season IN :train_seasons"
+            ).bindparams(sqlalchemy.bindparam("train_seasons", expanding=True))
+            res = conn.execute(stmt, {"league": league, "train_seasons": list(train_seasons)}).fetchall()
+            cutoff_stmt = sqlalchemy.text(
+                "SELECT MAX(start_time) FROM games WHERE sport = :league AND season IN :train_seasons"
+            ).bindparams(sqlalchemy.bindparam("train_seasons", expanding=True))
+            max_dt = conn.execute(cutoff_stmt, {"league": league, "train_seasons": list(train_seasons)}).scalar()
+            train_cutoff = (pd.to_datetime(max_dt, utc=True) + pd.Timedelta(seconds=1)).isoformat() if max_dt is not None else None
+        else:
+            stmt = sqlalchemy.text(
+                "SELECT DISTINCT g.player_id FROM player_game_logs g "
+                "JOIN games gm ON g.game_id = gm.game_id "
+                "WHERE gm.sport = :league"
+            )
+            res = conn.execute(stmt, {"league": league}).fetchall()
+            train_cutoff = None
     player_ids = [row[0] for row in res]
-    logger.info(f"Found {len(player_ids)} players with game logs.")
-    
+    logger.info(f"Found {len(player_ids)} players with game logs (train_seasons={train_seasons}, cutoff={train_cutoff}).")
+
     logger.info("Loading player positions...")
     with engine.connect() as conn:
         pos_res = conn.execute(sqlalchemy.text("SELECT master_player_id, position FROM players")).fetchall()
     player_positions = {row[0]: row[1] for row in pos_res}
-    
-    from src.models import get_default_priors
-    cached_priors = get_default_priors()
-    
+
+    cached_priors = get_default_priors(league=league)
+
     logger.info("Compiling global feature matrix player-by-player...")
     all_player_dfs = {}
-    
-    for idx, pid in enumerate(player_ids):
+
+    for pid in player_ids:
         try:
-            df_p = fe.build_player_feature_matrix(pid, pd.DataFrame())
-            if not df_p.empty and len(df_p) >= 5:
-                df_p['usage_rate'] = (
-                    (df_p['points'] + 1.5 * df_p['assists'] + df_p['turnovers'])
-                    / (df_p['minutes_played'] * 2.0 + 1e-5)
-                )
-                df_p['usage_rate'] = df_p['usage_rate'].clip(0.05, 0.45)
-                df_p['roll_min'] = df_p['minutes_played'].shift(1).ewm(alpha=0.3, adjust=False).mean()
-                df_p['roll_usg'] = df_p['usage_rate'].shift(1).ewm(alpha=0.3, adjust=False).mean()
+            df_p = fe.build_player_feature_matrix(pid, pd.DataFrame(), target_date=train_cutoff)
+            if train_seasons and not df_p.empty and "season" in df_p.columns:
+                # Strictly wall off future test seasons BEFORE computing any career tiers or rolling features.
+                df_p = df_p[df_p["season"].isin(train_seasons)].copy()
+            if df_p.empty or len(df_p) < 5:
+                continue
 
-                for col, default in [
-                    ('potential_assists', 0.0), ('touches', 0.0), ('passes_made', 0.0), 
-                    ('time_of_possession_sec', 0.0), ('avg_defender_distance_ft', 4.5),
-                    ('shorthanded_points', 0.0), ('pace_differential', 0.0)
-                ]:
-                    if col not in df_p.columns:
-                        df_p[col] = default
-                    else:
-                        df_p[col] = df_p[col].fillna(default)
-                        
-                df_p['roll_potential_assists'] = df_p['potential_assists'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-                df_p['roll_touches'] = df_p['touches'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-                df_p['roll_passes_made'] = df_p['passes_made'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-                df_p['roll_time_of_possession_sec'] = df_p['time_of_possession_sec'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-                df_p['roll_defender_distance'] = df_p['avg_defender_distance_ft'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(4.5)
-                df_p['roll_shorthanded_points'] = df_p['shorthanded_points'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-                
-                df_p['ts_pct'] = df_p['points'] / (2 * (df_p['field_goals_attempted'] + 0.44 * df_p['free_throws_attempted']) + 1e-5)
-                df_p['reb_rate'] = (df_p['rebounds'] / (df_p['minutes_played'] + 1e-5)) * 36.0
-                df_p['ast_rate'] = (df_p['assists'] / (df_p['minutes_played'] + 1e-5)) * 36.0
-                df_p['usg_efficiency'] = df_p['points'] / ((df_p['usage_rate'] * df_p['minutes_played']) + 1e-5)
-
-                df_p['roll_ts_pct'] = df_p['ts_pct'].shift(1).ewm(alpha=0.3, adjust=False).mean()
-                df_p['roll_reb_rate'] = df_p['reb_rate'].shift(1).ewm(alpha=0.3, adjust=False).mean()
-                df_p['roll_ast_rate'] = df_p['ast_rate'].shift(1).ewm(alpha=0.3, adjust=False).mean()
-                df_p['roll_plus_minus'] = df_p['plus_minus'].shift(1).ewm(alpha=0.3, adjust=False).mean()
-                df_p['roll_usg_efficiency'] = df_p['usg_efficiency'].shift(1).ewm(alpha=0.3, adjust=False).mean()
-                
-                for stat_col in TARGET_METRICS.values():
-                    if stat_col not in df_p.columns:
-                        df_p[stat_col] = 0.0
-                        
-                all_player_dfs[pid] = df_p
+            df_p = compute_causal_player_features(df_p, league=league)
+            for stat_col in TARGET_METRICS.values():
+                if stat_col not in df_p.columns:
+                    df_p[stat_col] = 0.0
+            all_player_dfs[pid] = df_p
         except Exception as e:
             logger.error(f"Error compiling features for player {pid}: {e}")
 
@@ -146,7 +146,7 @@ def train_global_ensemble(
         "learning_rate": 0.05,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
-        "random_state": 42
+        "random_state": 42,
     }
 
     lgb_params = {
@@ -159,90 +159,122 @@ def train_global_ensemble(
         "bagging_fraction": 0.8,
         "bagging_freq": 1,
         "random_state": 42,
-        "verbose": -1
+        "verbose": -1,
     }
 
+    custom_config = {}
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            custom_config = json.load(f)
+        logger.info(f"Loaded custom model configuration from {config_path}")
+
     for target_key, stat_col in TARGET_METRICS.items():
+        if target_keys is not None and target_key not in target_keys:
+            continue
+
         logger.info(f"Preparing training data for target: {target_key} (col: {stat_col})")
+        active_features = get_active_feature_columns(league=league, stat_col=stat_col)
+
+        target_xgb_params = xgb_params.copy()
+        target_lgb_params = lgb_params.copy()
+        if not any(c in active_features for c in CATEGORICAL_ID_COLUMNS):
+            target_xgb_params.pop("enable_categorical", None)
+
+        if target_key in custom_config:
+            if "xgb_params" in custom_config[target_key]:
+                target_xgb_params.update(custom_config[target_key]["xgb_params"])
+            if "lgb_params" in custom_config[target_key]:
+                target_lgb_params.update(custom_config[target_key]["lgb_params"])
+        else:
+            if "xgb_params" in custom_config:
+                target_xgb_params.update(custom_config["xgb_params"])
+            if "lgb_params" in custom_config:
+                target_lgb_params.update(custom_config["lgb_params"])
+
         all_dfs = []
         for pid, df_p in all_player_dfs.items():
-            df = df_p.copy()
-            if stat_col not in df.columns:
+            if stat_col not in df_p.columns:
                 continue
-
-            df['roll_stat'] = df.groupby('player_id')[stat_col].shift(1).ewm(alpha=0.3, adjust=False).mean()
-            df['roll_stat_var'] = df.groupby('player_id')[stat_col].shift(1).ewm(alpha=0.3, adjust=False).var().fillna(0.0)
-            
-            # Bayesian shrinkage for residuals
-            position = player_positions.get(df['player_id'].iloc[0], "SG")
-            prior_per_36 = cached_priors.get(stat_col, {}).get(position, 15.0)
-            
-            df['roll_stat_per_36'] = (df['roll_stat'] / (df['roll_min'] + 1e-5)) * 36.0
-            cum_min = df.groupby('player_id')['minutes_played'].cumsum()
-            
-            df['bayesian_roll_per_36'] = [
-                apply_bayesian_shrinkage(rs_36, cm, prior_per_36, K=500.0)
-                for rs_36, cm in zip(df['roll_stat_per_36'], cum_min)
-            ]
-            df['bayesian_roll_stat'] = (df['bayesian_roll_per_36'] / 36.0) * df['roll_min']
-            
-            df['target_residual'] = df[stat_col] - df['bayesian_roll_stat']
-            df['roll_residual'] = df.groupby('player_id')['target_residual'].shift(1).ewm(alpha=0.3, adjust=False).mean().fillna(0.0)
-            
+            position = player_positions.get(df_p["player_id"].iloc[0], "SG")
+            df = compute_target_rolling_features(
+                df_p,
+                stat_col=stat_col,
+                position=position,
+                cached_priors=cached_priors,
+                league=league,
+            )
             all_dfs.append(df)
-            
+
         if not all_dfs:
             continue
-            
-        df = pd.concat(all_dfs, ignore_index=True)
-        if 'start_time' in df.columns:
-            df['start_time'] = pd.to_datetime(df['start_time'], utc=True)
-            df = df.sort_values('start_time').reset_index(drop=True)
 
-        for col in FEATURE_COLUMNS + ['target_residual', stat_col]:
-            if col in ['player_id', 'team_id', 'opponent_team_id']:
-                df[col] = df[col].astype('category')
+        df = pd.concat(all_dfs, ignore_index=True)
+        if "start_time" in df.columns:
+            df["start_time"] = pd.to_datetime(df["start_time"], utc=True)
+            df = df.sort_values(["start_time", "player_id"]).reset_index(drop=True)
+
+        for col in active_features + ["target_residual", stat_col]:
+            if col in CATEGORICAL_ID_COLUMNS:
+                if col == "player_id":
+                    df[col] = df[col].astype(str)
+                else:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
             else:
-                df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
-        
-        train_df = df.dropna(subset=FEATURE_COLUMNS + ['target_residual', stat_col]).copy()
+                df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+
+        train_df = df.dropna(subset=active_features + ["target_residual", stat_col]).copy().reset_index(drop=True)
         if train_df.empty:
             logger.warning(f"No valid data remaining for {target_key} after NA drop.")
             continue
-            
-        for cat_col in ['player_id', 'team_id', 'opponent_team_id']:
-            train_df[cat_col] = train_df[cat_col].astype('category')
-            
+
+        for cat_col in CATEGORICAL_ID_COLUMNS:
+            if cat_col in train_df.columns:
+                if cat_col == "player_id":
+                    train_df[cat_col] = train_df[cat_col].astype(str).astype("category")
+                else:
+                    train_df[cat_col] = train_df[cat_col].astype(int).astype("category")
+
         logger.info(f"Target {target_key} clean training logs: {len(train_df)}")
         if len(train_df) < 20:
             continue
-            
-        X_train = train_df[FEATURE_COLUMNS]
-        y_train = train_df['target_residual'].values
+
+        X_train = train_df[active_features]
+        y_train = train_df["target_residual"].values
 
         n_splits = 5
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        
         oof_xgb = []
         oof_lgb = []
         oof_y = []
+        oof_indices = []
 
-        logger.info(f"Generating OOF residual predictions via {n_splits}-split TimeSeriesSplit for {target_key}...")
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
+        logger.info(f"Generating OOF residual predictions via {n_splits}-split date-grouped TimeSeriesSplit for {target_key}...")
+        for train_idx, val_idx in _iter_grouped_time_splits(train_df, n_splits=n_splits):
             X_f_train, X_f_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
             y_f_train, y_f_val = y_train[train_idx], y_train[val_idx]
 
-            fold_xgb = xgb.XGBRegressor(**xgb_params)
-            fold_xgb.fit(X_f_train, y_f_train)
+            es_split = max(1, int(len(X_f_train) * 0.85))
+            X_es_train, X_es_val = X_f_train.iloc[:es_split], X_f_train.iloc[es_split:]
+            y_es_train, y_es_val = y_f_train[:es_split], y_f_train[es_split:]
+
+            fold_xgb = xgb.XGBRegressor(**{**target_xgb_params, "n_estimators": 500, "early_stopping_rounds": 20})
+            fold_xgb.fit(X_es_train, y_es_train, eval_set=[(X_es_val, y_es_val)], verbose=False)
             pred_xgb_val = fold_xgb.predict(X_f_val)
 
-            dtrain_f = lgb.Dataset(X_f_train, label=y_f_train)
-            fold_lgb = lgb.train(lgb_params, dtrain_f, num_boost_round=150)
+            dtrain_f = lgb.Dataset(X_es_train, label=y_es_train)
+            dval_f = lgb.Dataset(X_es_val, label=y_es_val, reference=dtrain_f)
+            fold_lgb = lgb.train(
+                target_lgb_params,
+                dtrain_f,
+                num_boost_round=500,
+                valid_sets=[dval_f],
+                callbacks=[lgb.early_stopping(20, verbose=False)],
+            )
             pred_lgb_val = fold_lgb.predict(X_f_val)
 
             oof_xgb.extend(pred_xgb_val)
             oof_lgb.extend(pred_lgb_val)
             oof_y.extend(y_f_val)
+            oof_indices.extend(val_idx.tolist())
 
         stacked_oof = np.column_stack([oof_xgb, oof_lgb])
         oof_y_arr = np.array(oof_y)
@@ -251,47 +283,47 @@ def train_global_ensemble(
         meta_learner.fit(stacked_oof, oof_y_arr)
 
         logger.info(f"Fitting final full-dataset XGBoost and LightGBM models for {target_key}...")
-        final_xgb = xgb.XGBRegressor(**xgb_params)
-        final_xgb.fit(X_train, y_train)
+        final_xgb = xgb.XGBRegressor(**{**target_xgb_params, "n_estimators": 150})
+        final_xgb.fit(X_train, y_train, verbose=False)
 
         dtrain_full = lgb.Dataset(X_train, label=y_train)
-        final_lgb = lgb.train(lgb_params, dtrain_full, num_boost_round=150)
-        
-        # ------------------------------------------------------------------
-        # Calibrate Negative Binomial Dispersion (alpha) via Optuna
-        # ------------------------------------------------------------------
-        full_preds_xgb = final_xgb.predict(X_train)
-        full_preds_lgb = final_lgb.predict(X_train)
-        full_stacked = np.column_stack([full_preds_xgb, full_preds_lgb])
-        full_meta_residuals = meta_learner.predict(full_stacked)
-        
-        mu_vals = train_df['roll_stat'].values + full_meta_residuals
+        final_lgb = lgb.train(target_lgb_params, dtrain_full, num_boost_round=500)
+
+        # Calibrate Negative Binomial Dispersion (alpha) strictly on OOF predictions (no in-sample bias)
+        oof_meta_residuals = meta_learner.predict(stacked_oof)
+        oof_df = train_df.iloc[oof_indices]
+
+        if league == "WNBA":
+            if stat_col == "points":
+                mu_vals = oof_df["roll_stat"].values + (oof_meta_residuals * oof_df["roll_min"].values)
+            else:
+                mu_vals = oof_df["roll_stat"].values + oof_meta_residuals
+        else:
+            mu_vals = oof_df["bayesian_roll_stat"].values + oof_meta_residuals
+
         mu_vals = np.clip(mu_vals, 0.001, None)
-        true_vals = train_df[stat_col].values
-        
+        true_vals = oof_df[stat_col].values
+
         def crps_objective(trial):
-            alpha = trial.suggest_float('alpha', 0.01, 3.0)
+            alpha = trial.suggest_float("alpha", 0.01, 3.0)
             n_nb = 1.0 / alpha
             p_nb = 1.0 / (1.0 + alpha * mu_vals)
-            
-            # Penalize mathematically impossible states or extreme overdispersion
             if np.any(p_nb <= 0.0) or np.any(p_nb >= 1.0):
                 return 1e9
-                
-            nll = -np.mean(stats.nbinom.logpmf(true_vals, n_nb, p_nb))
-            return nll
+            return float(-np.mean(stats.nbinom.logpmf(true_vals, n_nb, p_nb)))
 
         logger.info(f"Running Optuna calibration for {target_key} dispersion parameter (alpha)...")
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction="minimize")
         study.optimize(crps_objective, n_trials=20)
-        best_alpha = study.best_params['alpha']
+        best_alpha = study.best_params["alpha"]
         logger.info(f"Target {target_key} Calibrated Dispersion (alpha): {best_alpha:.4f}")
 
-        xgb_path = f"models/global_x{target_key}_xgb.json"
-        lgb_path = f"models/global_x{target_key}_lgb.txt"
-        meta_path = f"models/global_x{target_key}_meta.json"
-        compat_path = f"models/global_x{target_key}.json"
+        os.makedirs(model_dir, exist_ok=True)
+        xgb_path = os.path.join(model_dir, f"global_x{target_key}_xgb.json")
+        lgb_path = os.path.join(model_dir, f"global_x{target_key}_lgb.txt")
+        meta_path = os.path.join(model_dir, f"global_x{target_key}_meta.json")
+        compat_path = os.path.join(model_dir, f"global_x{target_key}.json")
 
         final_xgb.save_model(xgb_path)
         final_xgb.save_model(compat_path)
@@ -301,17 +333,21 @@ def train_global_ensemble(
             "target": target_key,
             "stat_column": stat_col,
             "target_type": "residual",
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "feature_columns": active_features,
+            "train_seasons": list(train_seasons) if train_seasons else None,
             "intercept": float(meta_learner.intercept_),
             "weights": [float(w) for w in meta_learner.coef_],
             "features": ["xgb_residual", "lgb_residual"],
             "alpha": best_alpha,
             "n_splits": n_splits,
-            "training_samples": len(train_df)
+            "training_samples": len(train_df),
         }
         with open(meta_path, "w") as f:
             json.dump(meta_data, f, indent=2)
 
         logger.info(f"Successfully saved residual ensemble artifacts for {target_key}")
+
 
 if __name__ == "__main__":
     train_global_ensemble()
