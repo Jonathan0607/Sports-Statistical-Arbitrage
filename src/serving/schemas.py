@@ -298,6 +298,11 @@ class AllocateCandidateOutcome(StrictBaseModel):
     zinb_mu: Optional[float] = Field(default=None, ge=0.0, le=200.0)
     zinb_pi: Optional[float] = Field(default=None, ge=0.0, lt=1.0)
     zinb_n: Optional[float] = Field(default=None, gt=0.0, le=1e7)
+    position: Optional[str] = Field(default=None, max_length=16)
+    ewma_minutes: Optional[float] = Field(default=None, ge=0.0, le=65.0)
+    vacated_usage: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    opp_pace_factor: Optional[float] = Field(default=None, gt=0.0, le=200.0)
+    team_strength: Optional[float] = Field(default=None, ge=-100.0, le=100.0)
 
     @field_validator("side", mode="before")
     @classmethod
@@ -310,7 +315,19 @@ class AllocateCandidateOutcome(StrictBaseModel):
                 return "Under"
         return v
 
-    @field_validator("marginal_prob", "payout_odds", "expected_edge", "line", "zinb_mu", "zinb_pi", "zinb_n")
+    @field_validator(
+        "marginal_prob",
+        "payout_odds",
+        "expected_edge",
+        "line",
+        "zinb_mu",
+        "zinb_pi",
+        "zinb_n",
+        "ewma_minutes",
+        "vacated_usage",
+        "opp_pace_factor",
+        "team_strength",
+    )
     @classmethod
     def check_finite(cls, v: Optional[float], info) -> Optional[float]:
         if v is None:
@@ -324,6 +341,9 @@ class AllocateRequest(StrictBaseModel):
     candidates: List[AllocateCandidateOutcome] = Field(..., min_length=1, max_length=100)
     covariance_matrix: Optional[List[List[float]]] = None
     copula_type: CopulaTypeEnum = CopulaTypeEnum.auto
+    use_conditional_copula: Optional[bool] = None
+    projected_pace_diff: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    abs_team_strength_diff: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     shrinkage_delta: float = Field(default=0.20, ge=0.0, le=1.0)
     max_bankroll_fraction: float = Field(default=0.05, gt=0.0, le=1.0)
     kelly_fraction: float = Field(default=0.25, gt=0.0, le=1.0)
@@ -341,6 +361,13 @@ class AllocateRequest(StrictBaseModel):
     @field_validator("shrinkage_delta", "max_bankroll_fraction", "kelly_fraction", "bankroll_usd")
     @classmethod
     def check_finite_scalar(cls, v: float, info) -> float:
+        return _assert_finite_float(v, info.field_name)
+
+    @field_validator("projected_pace_diff", "abs_team_strength_diff")
+    @classmethod
+    def check_finite_optional_context(cls, v: Optional[float], info) -> Optional[float]:
+        if v is None:
+            return None
         return _assert_finite_float(v, info.field_name)
 
     @model_validator(mode="after")
@@ -386,6 +413,7 @@ class AllocateResponse(StrictBaseModel):
     solver_backend: str
     is_rank_deficient: bool
     numerical_rank: int = Field(..., ge=0)
+    copula_mode: str = "static"
     latency_ms: float = Field(..., ge=0.0)
 
 

@@ -111,7 +111,7 @@ def test_stat_specific_regularization_search_space():
     # Rebounds should have restricted max_depth in [1, 3] and elevated penalties
     assert 1 <= params_reb["max_depth"] <= 3
     assert 5.0 <= params_reb["reg_alpha"] <= 100.0
-    assert 10.0 <= params_reb["reg_lambda"] <= 200.0
+    assert 15.0 <= params_reb["reg_lambda"] <= 250.0
     assert 0.005 <= params_reb["learning_rate"] <= 0.05
 
     study_pts = optuna.create_study()

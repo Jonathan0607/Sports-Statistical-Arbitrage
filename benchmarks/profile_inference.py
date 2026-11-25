@@ -340,7 +340,12 @@ def _bench_api_roundtrip() -> Dict[str, Any]:
     mock_redis = MagicMock()
     mock_redis.ping.return_value = True
     mock_redis.get.return_value = None
-    predictor = InferencePredictor(model_dir="models/wf_fold2", redis_client=mock_redis, auto_connect_redis=False)
+    predictor = InferencePredictor(
+        model_dir="models/wf_fold2",
+        redis_client=mock_redis,
+        auto_connect_redis=False,
+        log_predictions=False,
+    )
     app = create_app(predictor=predictor)
     client = TestClient(app)
 

@@ -18,6 +18,11 @@ import pandas as pd
 import xgboost as xgb
 from scipy import stats
 
+from src.conditional_copula import (
+    ConditionalCopulaModel,
+    copula_joint_probability as conditional_copula_joint_probability,
+    ensure_psd_covariance,
+)
 from src.drift_monitor import DriftAction, DriftMonitor
 from src.execution import DEFAULT_CORRELATIONS
 from src.feature_contract import (
@@ -79,6 +84,8 @@ class InferencePredictor:
         drift_monitor: Optional[DriftMonitor] = None,
         telemetry_db_url: Optional[str] = None,
         log_predictions: Optional[bool] = None,
+        conditional_copula_path: Optional[str] = None,
+        use_conditional_copula: Optional[bool] = None,
     ):
         self.registry = registry or ModelRegistry(registry_dir or DEFAULT_REGISTRY_DIR)
         champion = self.registry.get_champion()
@@ -115,6 +122,32 @@ class InferencePredictor:
             )
         else:
             self.log_predictions = bool(log_predictions)
+
+        copula_artifact = (
+            conditional_copula_path
+            or os.getenv("CONDITIONAL_COPULA_PATH")
+            or os.path.join(self.registry.registry_dir, "conditional_copula_fold2.json")
+        )
+        self.conditional_copula: Optional[ConditionalCopulaModel] = None
+        if copula_artifact and os.path.isfile(copula_artifact):
+            try:
+                self.conditional_copula = ConditionalCopulaModel.load(copula_artifact)
+            except Exception as exc:
+                logger.warning(f"Failed loading conditional copula artifact {copula_artifact}: {exc}")
+
+        if use_conditional_copula is not None:
+            self.use_conditional_copula = bool(use_conditional_copula and self.conditional_copula is not None)
+        elif os.getenv("USE_CONDITIONAL_COPULA") is not None:
+            self.use_conditional_copula = (
+                os.getenv("USE_CONDITIONAL_COPULA", "false").lower() in ("1", "true", "yes")
+                and self.conditional_copula is not None
+            )
+        elif self.conditional_copula is not None:
+            self.use_conditional_copula = bool(
+                self.conditional_copula.metadata.get("default_enabled_by_ablation", False)
+            )
+        else:
+            self.use_conditional_copula = False
 
         self.redis_client = redis_client
         if self.redis_client is None and auto_connect_redis:
@@ -612,10 +645,18 @@ class InferencePredictor:
         )
 
         joint_pairs: List[JointPairPricing] = []
+        copula_mode = "covariance_override"
         if req.covariance_matrix is not None:
             cov_raw = np.array(req.covariance_matrix, dtype=float)
             cov_raw = 0.5 * (cov_raw + cov_raw.T)
         else:
+            use_cond = (
+                bool(req.use_conditional_copula)
+                if req.use_conditional_copula is not None
+                else self.use_conditional_copula
+            ) and (self.conditional_copula is not None)
+            copula_mode = "conditional" if use_cond else "static"
+
             probs = np.array([float(c.marginal_prob) for c in req.candidates], dtype=float)
             cov_raw = np.zeros((n, n), dtype=float)
             for i in range(n):
@@ -627,6 +668,43 @@ class InferencePredictor:
                     rel = self._determine_relationship(c1, c2)
                     if rel == "independent":
                         rho = 0.0
+                        jp = probs[i] * probs[j]
+                        cop_name = "independent"
+                    elif use_cond and self.conditional_copula is not None:
+                        leg1_ctx = {
+                            "team_id": c1.team_id,
+                            "position": c1.position,
+                            "stat": c1.stat,
+                            "side": c1.side.value,
+                            "ewma_minutes": c1.ewma_minutes,
+                            "vacated_usage": c1.vacated_usage,
+                            "opp_pace_factor": c1.opp_pace_factor,
+                            "team_strength": c1.team_strength,
+                            "projected_pace_diff": req.projected_pace_diff,
+                            "abs_team_strength_diff": req.abs_team_strength_diff,
+                        }
+                        leg2_ctx = {
+                            "team_id": c2.team_id,
+                            "position": c2.position,
+                            "stat": c2.stat,
+                            "side": c2.side.value,
+                            "ewma_minutes": c2.ewma_minutes,
+                            "vacated_usage": c2.vacated_usage,
+                            "opp_pace_factor": c2.opp_pace_factor,
+                            "team_strength": c2.team_strength,
+                            "projected_pace_diff": req.projected_pace_diff,
+                            "abs_team_strength_diff": req.abs_team_strength_diff,
+                        }
+                        rho = self.conditional_copula.predict_tau_single(leg1_ctx, leg2_ctx)
+                        force_fam = None if req.copula_type == CopulaTypeEnum.auto else req.copula_type.value
+                        jp, cop_name = conditional_copula_joint_probability(
+                            probs[i],
+                            probs[j],
+                            rho,
+                            c1.side.value.lower(),
+                            c2.side.value.lower(),
+                            force_family=force_fam,
+                        )
                     else:
                         s1 = self._clean_stat_name(c1.stat)
                         s2 = self._clean_stat_name(c2.stat)
@@ -635,14 +713,14 @@ class InferencePredictor:
                         side1 = c1.side.value.lower()
                         side2 = c2.side.value.lower()
                         rho = base_rho if side1 == side2 else -base_rho
-                    jp, cop_name = self._copula_joint_probability(
-                        probs[i],
-                        probs[j],
-                        rho,
-                        c1.side.value.lower(),
-                        c2.side.value.lower(),
-                        req.copula_type,
-                    )
+                        jp, cop_name = self._copula_joint_probability(
+                            probs[i],
+                            probs[j],
+                            rho,
+                            c1.side.value.lower(),
+                            c2.side.value.lower(),
+                            req.copula_type,
+                        )
                     cov_ij = jp - (probs[i] * probs[j])
                     cov_raw[i, j] = cov_ij
                     cov_raw[j, i] = cov_ij
@@ -658,6 +736,7 @@ class InferencePredictor:
                                 independent_prob=float(probs[i] * probs[j]),
                             )
                         )
+            cov_raw = ensure_psd_covariance(cov_raw, min_eig=0.0)
 
         # Numerical stability telemetry on raw covariance matrix
         sv_raw = np.linalg.svd(cov_raw, compute_uv=False)
@@ -722,6 +801,7 @@ class InferencePredictor:
             solver_backend=solver_backend,
             is_rank_deficient=is_rank_deficient,
             numerical_rank=numerical_rank,
+            copula_mode=copula_mode,
             latency_ms=latency_ms,
         )
 

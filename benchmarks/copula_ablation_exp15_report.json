@@ -1,0 +1,448 @@
+{
+  "experiment": "Experiment 15: Conditional Copula theta(x) Walk-Forward Joint Calibration Ablation",
+  "feature_schema_version": "1.0.0",
+  "elapsed_seconds": 168.16,
+  "cutoffs": {
+    "fold1_train": "2024-06-17T05:00:01+00:00",
+    "fold1_eval": "2025-06-22T05:00:01+00:00",
+    "fold2_eval": "2026-06-13T05:00:01+00:00"
+  },
+  "default_conditional_active": true,
+  "beats_fold1_static": true,
+  "beats_fold2_static": true,
+  "fold2_marginal_calibration": {
+    "count": 83904,
+    "brier_score": 0.243877,
+    "log_loss": 0.685933,
+    "ece": 0.04549
+  },
+  "copula_artifact_path": "models/registry/conditional_copula_fold2.json",
+  "fold2_top_learned_weights": [
+    {
+      "feature": "dir_OO",
+      "weight": 0.158305
+    },
+    {
+      "feature": "dir_UU",
+      "weight": -0.156305
+    },
+    {
+      "feature": "blowout_x_oo",
+      "weight": 0.036769
+    },
+    {
+      "feature": "abs_team_strength_diff",
+      "weight": -0.022429
+    },
+    {
+      "feature": "blowout_x_uu",
+      "weight": 0.017241
+    },
+    {
+      "feature": "pair_pts_ast",
+      "weight": 0.012685
+    },
+    {
+      "feature": "pair_pts_pts",
+      "weight": -0.011199
+    },
+    {
+      "feature": "is_same_position",
+      "weight": 0.011102
+    },
+    {
+      "feature": "teammate_reb_reb_dir",
+      "weight": 0.011078
+    },
+    {
+      "feature": "is_same_team",
+      "weight": 0.007813
+    },
+    {
+      "feature": "teammate_pts_ast_dir",
+      "weight": 0.007583
+    },
+    {
+      "feature": "min_player_ewma_minutes_scaled",
+      "weight": -0.007429
+    }
+  ],
+  "fold1": {
+    "overall": {
+      "independent_zinb": {
+        "count": 62400,
+        "joint_logloss": 0.55865,
+        "joint_brier": 0.185997,
+        "joint_ece": 0.023014,
+        "mean_bias": -0.002695,
+        "empirical_joint_rate": 0.251635,
+        "mean_pred_prob": 0.25433
+      },
+      "static_copula": {
+        "count": 62400,
+        "joint_logloss": 0.559859,
+        "joint_brier": 0.186379,
+        "joint_ece": 0.026718,
+        "mean_bias": -0.001204,
+        "empirical_joint_rate": 0.251635,
+        "mean_pred_prob": 0.252838
+      },
+      "conditional_copula": {
+        "count": 62400,
+        "joint_logloss": 0.556043,
+        "joint_brier": 0.18511,
+        "joint_ece": 0.010515,
+        "mean_bias": -0.004909,
+        "empirical_joint_rate": 0.251635,
+        "mean_pred_prob": 0.256543
+      },
+      "tau_hat_stats": {
+        "mean": 0.02339,
+        "std": 0.26453,
+        "min": -0.37983,
+        "max": 0.6338
+      }
+    },
+    "sub_regimes": {
+      "teammate_same_dir": {
+        "independent_zinb": {
+          "count": 19700,
+          "joint_logloss": 0.568426,
+          "joint_brier": 0.190431,
+          "joint_ece": 0.032934,
+          "mean_bias": 0.005784,
+          "empirical_joint_rate": 0.261574,
+          "mean_pred_prob": 0.255789
+        },
+        "static_copula": {
+          "count": 19700,
+          "joint_logloss": 0.57088,
+          "joint_brier": 0.191084,
+          "joint_ece": 0.040293,
+          "mean_bias": 0.012985,
+          "empirical_joint_rate": 0.261574,
+          "mean_pred_prob": 0.248588
+        },
+        "conditional_copula": {
+          "count": 19700,
+          "joint_logloss": 0.565417,
+          "joint_brier": 0.189487,
+          "joint_ece": 0.008432,
+          "mean_bias": 0.000802,
+          "empirical_joint_rate": 0.261574,
+          "mean_pred_prob": 0.260771
+        }
+      },
+      "cross_team": {
+        "independent_zinb": {
+          "count": 32681,
+          "joint_logloss": 0.555721,
+          "joint_brier": 0.184525,
+          "joint_ece": 0.026931,
+          "mean_bias": -0.008005,
+          "empirical_joint_rate": 0.247208,
+          "mean_pred_prob": 0.255213
+        },
+        "static_copula": {
+          "count": 32681,
+          "joint_logloss": 0.555968,
+          "joint_brier": 0.184659,
+          "joint_ece": 0.026262,
+          "mean_bias": -0.007829,
+          "empirical_joint_rate": 0.247208,
+          "mean_pred_prob": 0.255036
+        },
+        "conditional_copula": {
+          "count": 32681,
+          "joint_logloss": 0.5525,
+          "joint_brier": 0.183373,
+          "joint_ece": 0.015099,
+          "mean_bias": -0.009502,
+          "empirical_joint_rate": 0.247208,
+          "mean_pred_prob": 0.25671
+        }
+      },
+      "same_pos_substitute": {
+        "independent_zinb": {
+          "count": 6518,
+          "joint_logloss": 0.575395,
+          "joint_brier": 0.192854,
+          "joint_ece": 0.034729,
+          "mean_bias": 0.010174,
+          "empirical_joint_rate": 0.262811,
+          "mean_pred_prob": 0.252637
+        },
+        "static_copula": {
+          "count": 6518,
+          "joint_logloss": 0.576997,
+          "joint_brier": 0.193121,
+          "joint_ece": 0.038014,
+          "mean_bias": 0.012555,
+          "empirical_joint_rate": 0.262811,
+          "mean_pred_prob": 0.250256
+        },
+        "conditional_copula": {
+          "count": 6518,
+          "joint_logloss": 0.565332,
+          "joint_brier": 0.189639,
+          "joint_ece": 0.011909,
+          "mean_bias": 0.004649,
+          "empirical_joint_rate": 0.262811,
+          "mean_pred_prob": 0.258161
+        }
+      },
+      "blowout_high_spread": {
+        "independent_zinb": {
+          "count": 15600,
+          "joint_logloss": 0.556492,
+          "joint_brier": 0.184237,
+          "joint_ece": 0.02345,
+          "mean_bias": -0.0053,
+          "empirical_joint_rate": 0.248269,
+          "mean_pred_prob": 0.253569
+        },
+        "static_copula": {
+          "count": 15600,
+          "joint_logloss": 0.558336,
+          "joint_brier": 0.184819,
+          "joint_ece": 0.02796,
+          "mean_bias": -0.003663,
+          "empirical_joint_rate": 0.248269,
+          "mean_pred_prob": 0.251933
+        },
+        "conditional_copula": {
+          "count": 15600,
+          "joint_logloss": 0.553928,
+          "joint_brier": 0.183477,
+          "joint_ece": 0.017689,
+          "mean_bias": -0.009808,
+          "empirical_joint_rate": 0.248269,
+          "mean_pred_prob": 0.258078
+        }
+      }
+    },
+    "bootstrap": {
+      "vs_static_copula": {
+        "n_clusters_games": 1300,
+        "n_resamples": 1000,
+        "logloss_delta": -0.003816,
+        "logloss_ci95": [
+          -0.005619,
+          -0.001819
+        ],
+        "logloss_p_value": 0.0,
+        "brier_delta": -0.001268,
+        "brier_ci95": [
+          -0.001914,
+          -0.000577
+        ],
+        "brier_p_value": 0.0
+      },
+      "vs_independent_zinb": {
+        "n_clusters_games": 1300,
+        "n_resamples": 1000,
+        "logloss_delta": -0.002607,
+        "logloss_ci95": [
+          -0.004465,
+          -0.000701
+        ],
+        "logloss_p_value": 0.004,
+        "brier_delta": -0.000887,
+        "brier_ci95": [
+          -0.00155,
+          -0.000231
+        ],
+        "brier_p_value": 0.008
+      }
+    }
+  },
+  "fold2": {
+    "overall": {
+      "independent_zinb": {
+        "count": 62448,
+        "joint_logloss": 0.555516,
+        "joint_brier": 0.184713,
+        "joint_ece": 0.026641,
+        "mean_bias": -0.003812,
+        "empirical_joint_rate": 0.249183,
+        "mean_pred_prob": 0.252996
+      },
+      "static_copula": {
+        "count": 62448,
+        "joint_logloss": 0.556206,
+        "joint_brier": 0.184898,
+        "joint_ece": 0.028584,
+        "mean_bias": -0.0023,
+        "empirical_joint_rate": 0.249183,
+        "mean_pred_prob": 0.251483
+      },
+      "conditional_copula": {
+        "count": 62448,
+        "joint_logloss": 0.551709,
+        "joint_brier": 0.18346,
+        "joint_ece": 0.013853,
+        "mean_bias": -0.004924,
+        "empirical_joint_rate": 0.249183,
+        "mean_pred_prob": 0.254108
+      },
+      "tau_hat_stats": {
+        "mean": 0.01723,
+        "std": 0.20813,
+        "min": -0.28134,
+        "max": 0.525
+      }
+    },
+    "sub_regimes": {
+      "teammate_same_dir": {
+        "independent_zinb": {
+          "count": 19666,
+          "joint_logloss": 0.566208,
+          "joint_brier": 0.189144,
+          "joint_ece": 0.040015,
+          "mean_bias": -0.001543,
+          "empirical_joint_rate": 0.255924,
+          "mean_pred_prob": 0.257467
+        },
+        "static_copula": {
+          "count": 19666,
+          "joint_logloss": 0.567638,
+          "joint_brier": 0.18942,
+          "joint_ece": 0.043728,
+          "mean_bias": 0.005537,
+          "empirical_joint_rate": 0.255924,
+          "mean_pred_prob": 0.250387
+        },
+        "conditional_copula": {
+          "count": 19666,
+          "joint_logloss": 0.560505,
+          "joint_brier": 0.187419,
+          "joint_ece": 0.017224,
+          "mean_bias": -0.0082,
+          "empirical_joint_rate": 0.255924,
+          "mean_pred_prob": 0.264124
+        }
+      },
+      "cross_team": {
+        "independent_zinb": {
+          "count": 33016,
+          "joint_logloss": 0.556021,
+          "joint_brier": 0.185026,
+          "joint_ece": 0.025622,
+          "mean_bias": -0.002567,
+          "empirical_joint_rate": 0.250666,
+          "mean_pred_prob": 0.253234
+        },
+        "static_copula": {
+          "count": 33016,
+          "joint_logloss": 0.55627,
+          "joint_brier": 0.185129,
+          "joint_ece": 0.026898,
+          "mean_bias": -0.002201,
+          "empirical_joint_rate": 0.250666,
+          "mean_pred_prob": 0.252868
+        },
+        "conditional_copula": {
+          "count": 33016,
+          "joint_logloss": 0.552325,
+          "joint_brier": 0.183721,
+          "joint_ece": 0.011035,
+          "mean_bias": -0.001245,
+          "empirical_joint_rate": 0.250666,
+          "mean_pred_prob": 0.251911
+        }
+      },
+      "same_pos_substitute": {
+        "independent_zinb": {
+          "count": 6410,
+          "joint_logloss": 0.563013,
+          "joint_brier": 0.187224,
+          "joint_ece": 0.041806,
+          "mean_bias": -0.001239,
+          "empirical_joint_rate": 0.24961,
+          "mean_pred_prob": 0.250849
+        },
+        "static_copula": {
+          "count": 6410,
+          "joint_logloss": 0.563032,
+          "joint_brier": 0.187124,
+          "joint_ece": 0.043004,
+          "mean_bias": 0.001564,
+          "empirical_joint_rate": 0.24961,
+          "mean_pred_prob": 0.248046
+        },
+        "conditional_copula": {
+          "count": 6410,
+          "joint_logloss": 0.555782,
+          "joint_brier": 0.185004,
+          "joint_ece": 0.023672,
+          "mean_bias": -0.008642,
+          "empirical_joint_rate": 0.24961,
+          "mean_pred_prob": 0.258252
+        }
+      },
+      "blowout_high_spread": {
+        "independent_zinb": {
+          "count": 15648,
+          "joint_logloss": 0.558087,
+          "joint_brier": 0.185938,
+          "joint_ece": 0.022943,
+          "mean_bias": 0.001848,
+          "empirical_joint_rate": 0.255752,
+          "mean_pred_prob": 0.253903
+        },
+        "static_copula": {
+          "count": 15648,
+          "joint_logloss": 0.558854,
+          "joint_brier": 0.186224,
+          "joint_ece": 0.024631,
+          "mean_bias": 0.003341,
+          "empirical_joint_rate": 0.255752,
+          "mean_pred_prob": 0.252411
+        },
+        "conditional_copula": {
+          "count": 15648,
+          "joint_logloss": 0.553735,
+          "joint_brier": 0.184661,
+          "joint_ece": 0.007252,
+          "mean_bias": 0.000529,
+          "empirical_joint_rate": 0.255752,
+          "mean_pred_prob": 0.255223
+        }
+      }
+    },
+    "bootstrap": {
+      "vs_static_copula": {
+        "n_clusters_games": 1301,
+        "n_resamples": 1000,
+        "logloss_delta": -0.004497,
+        "logloss_ci95": [
+          -0.006071,
+          -0.002817
+        ],
+        "logloss_p_value": 0.0,
+        "brier_delta": -0.001439,
+        "brier_ci95": [
+          -0.002005,
+          -0.000843
+        ],
+        "brier_p_value": 0.0
+      },
+      "vs_independent_zinb": {
+        "n_clusters_games": 1301,
+        "n_resamples": 1000,
+        "logloss_delta": -0.003807,
+        "logloss_ci95": [
+          -0.005392,
+          -0.002193
+        ],
+        "logloss_p_value": 0.0,
+        "brier_delta": -0.001254,
+        "brier_ci95": [
+          -0.001805,
+          -0.000677
+        ],
+        "brier_p_value": 0.0
+      }
+    }
+  }
+}

@@ -56,3 +56,20 @@ All notable production architecture, runtime, serving, and build changes are doc
 - **Legacy Suite & SHAP Categorical Repair (`src/shap_analyzer.py`, `tests/`):**
   - Updated `src/shap_analyzer.py` to compute exact native XGBoost TreeSHAP (`pred_contribs=True` on `xgb.DMatrix(..., enable_categorical=True)`) and encode categorical axes for Beeswarm plotting.
   - Updated stale unit tests in `tests/test_shap_analyzer.py`, `tests/test_historical_replay.py` (marking live-Postgres integration test `@pytest.mark.db`), `tests/test_smart_cache_and_discord_handler.py`, `tests/test_src_dashboard.py`, and `tests/test_walk_forward.py` to match current production contracts.
+
+---
+
+## [2026-11-25] Phase 3: Context-Dependent Conditional Copula & Registry Calibration Enrichment
+
+### Added
+- **Conditional Copula Engine (`src/conditional_copula.py`, `models/registry/conditional_copula_fold2.json`):**
+  - Implemented regularized context-dependent Kendall's $\hat{\tau}(\mathbf{x}) \in [-0.75, 0.75]$ estimator optimized directly via L2-regularized Joint Binary Log-Loss with chronological validation.
+  - Enforced analytical output copulas (**Gumbel** for `OO` $\hat{\tau}>0$, **Clayton** for `UU` $\hat{\tau}>0$, exact polynomial **Frank** / **Gaussian** for negative/mixed concordance), strict Fréchet–Hoeffding bounds clamping, leg-swap feature symmetry (`build_pair_feature_row()`), and PSD covariance projection (`ensure_psd_covariance()`).
+- **Walk-Forward Joint Ablation & Tests (`benchmarks/run_copula_ablation.py`, `benchmarks/copula_ablation_exp15_report.json`, `tests/test_conditional_copula.py`):**
+  - Validated `conditional_copula` across `62,400` Fold 1 (`2024-25`) and `62,448` Fold 2 (`2025-26`) unseen pairs with `1,000`-resample `game_id` cluster bootstrap significance testing.
+  - Added deterministic unit + API suite covering Fréchet–Hoeffding bounds, negative/positive concordance mapping, PSD covariance eigenvalues, temporal PIT invariance, and `/v1/allocate` conditional/static switching.
+
+### Changed
+- **Allocation Serving & Registry Calibration (`src/serving/predictor.py`, `src/serving/schemas.py`, `models/registry/`):**
+  - Extended `AllocateCandidateOutcome` / `AllocateRequest` with backward-compatible optional context fields (`position`, `ewma_minutes`, `vacated_usage`, `opp_pace_factor`, `team_strength`, `projected_pace_diff`, `abs_team_strength_diff`, `use_conditional_copula`) and `AllocateResponse.copula_mode`.
+  - Enabled conditional copula by default inside `InferencePredictor.allocate()` after clearing Fold 1 + Fold 2 Experiment 15 gates (`p50 = 2.143 ms` on 32-leg `/v1/allocate`), and populated Fold 2 out-of-sample marginal calibration (`brier_score = 0.243877`) in `models/registry/champion.json`.

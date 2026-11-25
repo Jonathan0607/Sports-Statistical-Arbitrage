@@ -59,7 +59,7 @@
         "overall_mae": 2.6242967420400256,
         "overall_crps": 1.8871563377328853,
         "ewma_mae": 2.663042766914526,
-        "brier_score": null,
+        "brier_score": 0.243877,
         "by_stat": {
           "pts": {
             "meta_mae": 4.594,
@@ -76,9 +76,12 @@
             "ewma_mae": 1.373,
             "sim_crps": 0.927
           }
-        }
+        },
+        "marginal_log_loss": 0.685933,
+        "marginal_ece": 0.04549
       },
-      "notes": "Clean Phase 1 Fold 2 walk-forward ensemble (strictly point-in-time, schema 1.0.0)"
+      "notes": "Clean Phase 1 Fold 2 walk-forward ensemble (strictly point-in-time, schema 1.0.0)",
+      "conditional_copula_artifact": "models/registry/conditional_copula_fold2.json"
     }
   },
   "events": [

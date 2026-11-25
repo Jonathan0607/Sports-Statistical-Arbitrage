@@ -480,3 +480,40 @@ All evaluations are measured against a standardized Point-in-Time historical rep
 - **Model Registry Promotion Gate Outcome:**
   - **Outcome:** **`REJECTED`** (`challenger_best_combo` selected `ablation_b_no_cat_ids` since zero variants improved both MAE & CRPS on both folds simultaneously). Although `challenger_best_combo` improved Fold 2 (`2.6136 < 2.6243` MAE and `1.8739 < 1.8750` CRPS), it slightly regressed Fold 1 (`2.6464 > 2.6443` MAE, `1.9006 > 1.8994` CRPS). Under the multi-fold non-regression gate, incumbent Champion **`v2026.11.25-4c884cd`** remains active in `models/registry/champion.json`.
 
+---
+
+### Experiment 15: Conditional Copula $\theta(\mathbf{x})$ Walk-Forward Joint Calibration Ablation
+- **Date**: 2026-11-25
+- **Hypothesis**: Static pairwise correlation heuristics (`DEFAULT_CORRELATIONS`) ignore game-script regime shifts (blowout risk, substitute position cannibalization, pace differentials, and vacated usage) and miscalibrate same-direction vs. cross-team NBA dependence. Learning a regularized conditional Kendall's concordance $\hat{\tau}(\mathbf{x}) \in [-0.75, +0.75]$ strictly on historical `train_seasons` via direct Joint Binary Log-Loss over analytical **Gumbel** ($\mathrm{OO}, \hat{\tau}>0$), **Clayton** ($\mathrm{UU}, \hat{\tau}>0$), and **Frank** ($\hat{\tau}<0$ / $\mathrm{OU}$) copulas will improve out-of-sample joint calibration while preserving Fréchet–Hoeffding axioms and sub-5 ms `/v1/allocate` latency.
+- **Methodology ([src/conditional_copula.py](file:///Users/kingebenezer/Desktop/Coding/Projects/Statistical%20Arbitrage/src/conditional_copula.py), [benchmarks/run_copula_ablation.py](file:///Users/kingebenezer/Desktop/Coding/Projects/Statistical%20Arbitrage/benchmarks/run_copula_ablation.py))**:
+  - `odds_ticks` contains `0` historical pre-game Vegas spreads/totals in `sports_db`, so game-script context features were constructed strictly point-in-time (`0..T-1`): `is_same_team`, `is_same_position`, `projected_pace_diff`, `abs_team_strength_diff` (shifted EWMA net point differential), `combined_vacated_usage` (strict DNP `minutes == 0.0`), `min_player_ewma_minutes`, symmetric `stat_pair_type`, and `direction_pair` (`OO`, `UU`, `OU`).
+  - Evaluated out-of-sample on `62,400` pairs across `1,300` Fold 1 games (`2024-25`, trained on `2023-24` OOF ZINB marginals) and `62,448` pairs across `1,301` Fold 2 games (`2025-26`, trained on `2023-24` + `2024-25` clean Fold 1 OOS marginals) at natural half-point lines `floor(ewma) + 0.5`.
+  - Ran `1,000`-resample `game_id` cluster bootstrap (`seed=42`) on Joint Log-Loss and Joint Brier Score (`H1: Δ < 0`).
+- **Results — Overall Walk-Forward Comparison:**
+  - **Fold 1 Out-of-Sample (`2024-25`, `62,400` pairs, `1,300` games):**
+    | Dependence Model | Joint Log-Loss | Joint Brier | Joint ECE (10-bin) | Mean Bias | ΔLL vs. Static (95% CI, p-val) | ΔLL vs. Indep (95% CI, p-val) |
+    | :--- | ---: | ---: | ---: | ---: | :--- | :--- |
+    | `independent_zinb` | 0.558650 | 0.185997 | 0.023014 | -0.002695 | — | — |
+    | `static_copula` | 0.559859 | 0.186379 | 0.026718 | -0.001204 | — | — |
+    | **`conditional_copula`** | **0.556043** | **0.185110** | **0.010515** | -0.004909 | `-0.003816` (`[-0.005619, -0.001819]`, `p=0.0000`) | `-0.002607` (`[-0.004465, -0.000701]`, `p=0.0040`) |
+
+  - **Fold 2 Out-of-Sample (`2025-26`, `62,448` pairs, `1,301` games):**
+    | Dependence Model | Joint Log-Loss | Joint Brier | Joint ECE (10-bin) | Mean Bias | ΔLL vs. Static (95% CI, p-val) | ΔLL vs. Indep (95% CI, p-val) |
+    | :--- | ---: | ---: | ---: | ---: | :--- | :--- |
+    | `independent_zinb` | 0.555516 | 0.184713 | 0.026641 | -0.003812 | — | — |
+    | `static_copula` | 0.556206 | 0.184898 | 0.028584 | -0.002300 | — | — |
+    | **`conditional_copula`** | **0.551709** | **0.183460** | **0.013853** | -0.004924 | `-0.004497` (`[-0.006071, -0.002817]`, `p=0.0000`) | `-0.003807` (`[-0.005392, -0.002193]`, `p=0.0000`) |
+
+  - **Cluster-Bootstrap Brier Significance:**
+    - Fold 1: ΔBrier `-0.001268` (`p=0.0000`) vs. Static; `-0.000887` (`p=0.0080`) vs. Independent.
+    - Fold 2: ΔBrier `-0.001439` (`p=0.0000`) vs. Static; `-0.001254` (`p=0.0000`) vs. Independent.
+- **Sub-Regime Breakdown (Out-of-Sample Fold 1 / Fold 2 Joint ECE & Log-Loss):**
+  - `teammate_same_dir`: Static ECE degraded (`0.040293` F1 / `0.043728` F2) because hardcoded negative teammate penalties (`-0.10` pts-pts, `-0.15` reb-reb) under-predicted positive empirical team clustering (`26.16%` / `25.59%`); `conditional_copula` cut ECE to **`0.008432`** (F1) and **`0.017224`** (F2) while lowering Log-Loss (`0.565417` F1 / `0.560505` F2).
+  - `same_pos_substitute`: `conditional_copula` cut Log-Loss (`0.576997 → 0.565332` F1; `0.563032 → 0.555782` F2) and reduced ECE (`0.038014 → 0.011909` F1; `0.043004 → 0.023672` F2).
+  - `cross_team`: `conditional_copula` captured shared game-environment pace/total correlation (`0.555968 → 0.552500` F1 LL; `0.556270 → 0.552325` F2 LL).
+  - `blowout_high_spread` (Top quartile `abs_team_strength_diff`): ECE dropped from `0.027960` to **`0.017689`** (F1) and from `0.024631` to **`0.007252`** (F2).
+- **Serving Deployment, Registry Marginal Calibration & Latency (`benchmarks/latest_latency_report.json`):**
+  - Because `conditional_copula` beat `static_copula` (and `independent_zinb`) significantly on **both** Fold 1 and Fold 2 Joint Log-Loss and Brier Score, [models/registry/conditional_copula_fold2.json](file:///Users/kingebenezer/Desktop/Coding/Projects/Statistical%20Arbitrage/models/registry/conditional_copula_fold2.json) is enabled as the default copula engine in `POST /v1/allocate` (`copula_mode: "conditional"`, overridable per request via `use_conditional_copula=false`).
+  - Clean Fold 2 marginal calibration (`83,904` predictions at natural lines: `brier_score = 0.243877`, `log_loss = 0.685933`, `ece = 0.045490`) was populated into [models/registry/champion.json](file:///Users/kingebenezer/Desktop/Coding/Projects/Statistical%20Arbitrage/models/registry/champion.json) (`v2026.11.25-4c884cd`).
+  - Re-profiled `/v1/allocate` latency with live conditional copula active: **15-leg `p50 = 1.502 ms` (`p95 = 1.718 ms`)**, **32-leg `p50 = 2.143 ms` (`p95 = 2.406 ms`)**.
+
