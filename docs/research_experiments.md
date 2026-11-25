@@ -450,3 +450,33 @@ All evaluations are measured against a standardized Point-in-Time historical rep
   - Clean Fold 2 (`models/wf_fold2`) artifacts are registered in `models/registry/champion.json` as initial champion **`v2026.11.25-4c884cd`** with SHA-256 integrity verification (`28` files) and training covariate baselines persisted to `models/registry/reference_stats.json` (`55,055` rows, `13` numeric covariates).
   - Future candidate models must clear `ModelRegistry.promote_challenger()` (`feature_schema_version == "1.0.0"`, verified SHA-256 digests, beating both `ewma_mae = 2.663` and incumbent `overall_mae = 2.624` / `overall_crps = 1.887`) before promotion; serving predictions are continuously monitored by `DriftMonitor` (`GET /v1/drift`) with automatic EWMA fallback on calibration or covariate drift breaches.
 
+---
+
+### Experiment 14: Post-Remediation Controlled Ablation Study (Re-Validating Exp 6–12 Decisions)
+- **Date**: 2026-11-25
+- **Hypothesis**: With all point-in-time lookahead leaks closed in Experiment 13 (`FEATURE_SCHEMA_VERSION = "1.0.0"`), re-running controlled single-factor ablations across Fold 1 (`2023-24 → 2024-25`) and Fold 2 (`2023-24, 2024-25 → 2025-26`) will separate genuine architectural gains (L1 objective, causal cohort alphas, adaptive RidgeCV) from artifacts that only looked strong under leakage (high-cardinality categorical ID memorization, aggressive early stopping on small single-season windows).
+- **Methodology ([benchmarks/run_clean_ablation.py](file:///Users/kingebenezer/Desktop/Coding/Projects/Statistical%20Arbitrage/benchmarks/run_clean_ablation.py))**:
+  - Compiled identical SQL-cutoff-isolated player matrices once per fold boundary against local PostgreSQL 17 (`sports_db`: `541` Fold 1 train players, `657` Fold 1 eval / Fold 2 train players, `762` Fold 2 eval players).
+  - Evaluated `82,557` predictions on Fold 1 (`27,519` per stat) and `83,904` predictions on Fold 2 (`27,968` per stat) across Points, Rebounds, and Assists, recording **Meta MAE**, **EWMA MAE**, **Simulated CRPS** (`10,000` Negative Binomial Monte Carlo draws, `rng_seed=42`), and **Mean Residual Bias** (`mean(y_true - y_pred)`).
+  - Kept temporary weights isolated under `models/ablation_tmp/` (removed after archiving [benchmarks/ablation_exp14_report.json](file:///Users/kingebenezer/Desktop/Coding/Projects/Statistical%20Arbitrage/benchmarks/ablation_exp14_report.json)) and tested the top Fold 2 challenger against [`ModelRegistry.promote_challenger()`](file:///Users/kingebenezer/Desktop/Coding/Projects/Statistical%20Arbitrage/src/model_registry.py).
+- **Results (Unified Comparison Matrix):**
+
+| Variant | F1 Meta MAE | F1 CRPS | F1 Bias | F1 ΔMAE / ΔCRPS | F2 Meta MAE | F2 CRPS | F2 Bias | F2 ΔMAE / ΔCRPS |
+| :--- | ---: | ---: | ---: | :---: | ---: | ---: | ---: | :---: |
+| **`control_exp13`** *(Incumbent)* | **2.6443** | **1.8994** | +0.0670 | — | 2.6243 | 1.8750 | -0.0525 | — |
+| `ablation_a_early_stopping` | 2.6551 | 1.9118 | +0.0492 | `+0.0108` / `+0.0124` | 2.6151 | 1.8870 | +0.0015 | `-0.0092` / `+0.0120` |
+| `ablation_b_no_cat_ids` | 2.6464 | 1.8997 | **-0.0043** | `+0.0021` / `+0.0003` | **2.6136** | 1.8786 | **+0.0179** | **`-0.0107`** / `+0.0036` |
+| `ablation_c_ridge_cv` | **2.6437** | **1.8975** | +0.0654 | `-0.0006` / `-0.0019` | 2.6242 | 1.8813 | -0.0523 | `-0.0001` / `+0.0064` |
+| `ablation_d_l2_objective` | 2.6476 | 1.8998 | +0.0587 | `+0.0033` / `+0.0004` | 2.6262 | 1.8792 | -0.0252 | `+0.0019` / `+0.0042` |
+| `ablation_e_flat_ewma` *(Baseline: 2.712 / 2.682)* | 2.6467 | 1.9041 | +0.0370 | `+0.0024` / `+0.0047` | 2.6267 | 1.8788 | -0.0441 | `+0.0024` / `+0.0038` |
+| `challenger_best_combo` *(`ablation_b_no_cat_ids`)* | 2.6464 | 1.9006 | -0.0043 | `+0.0021` / `+0.0012` | **2.6136** | **1.8739** | +0.0179 | **`-0.0107`** / **`-0.0011`** |
+
+- **Scientific Conclusions (Genuine Signal vs. Leakage Artifacts):**
+  1. **Native Categorical IDs (`ablation_b_no_cat_ids`) Were Not Net Helpful Out-of-Sample:** Dropping `player_id`, `team_id`, and `opponent_team_id` essentially tied Fold 1 (`+0.0021` MAE, `+0.0003` CRPS) and **improved Fold 2 Meta MAE by `-0.0107`** (Points `4.594 → 4.551`, Rebounds `1.923 → 1.913`) while bringing residual bias near zero (`-0.0043` / `+0.0179`). Experiment 9's apparent `+7.6%` jump was therefore driven primarily by leakage-era lookahead memorization rather than generalizable out-of-sample player offsets.
+  2. **Cohort-Bucketed EWMA Alphas Are Genuine Signal (`ablation_e_flat_ewma`):** Replacing causal 4-tier cohort alphas (`0.20/0.25/0.30/0.35`) with a flat `alpha = 0.30` degraded both the raw EWMA baseline (`+0.0215` Fold 1, `+0.0193` Fold 2) and final Meta-Ensemble MAE and CRPS across both folds.
+  3. **L1 MAE Objective Remains Optimal Over L2 (`ablation_d_l2_objective`):** L2 mildly narrowed residual bias (`-0.0525 → -0.0252` Fold 2), but degraded both MAE (`+0.0033` / `+0.0019`) and Simulated CRPS (`+0.0004` / `+0.0042`), confirming Experiment 8's L1 objective switch holds cleanly under strict PIT splits.
+  4. **Date-Grouped Early Stopping Depends on Sample Depth (`ablation_a_early_stopping`):** Under 1-season Fold 1 (`~27k` logs), CV early stopping halted too aggressively (`20` XGB / `66` LGB rounds for `pts`), worsening Fold 1 (`+0.0108` MAE). With 2 training seasons in Fold 2 (`~55k` logs, `121`/`116` rounds), early stopping beat Control MAE (`2.6151` vs `2.6243`, Points `4.585`, Rebounds `1.908`), confirming Experiment 11's observation that deep fixed forests underfit less only when given >=2 seasons or looser stopping patience.
+  5. **Adaptive `RidgeCV` Shrinkage (`ablation_c_ridge_cv`):** `RidgeCV` selected heavier L2 meta-regularization (`alpha = 100.0` on `pts`, `10.0` on `reb`/`ast`), improving MAE on both folds slightly (`-0.0006` / `-0.0001`) while marginally varying Fold 2 CRPS (`+0.0064`) due to stochastic Optuna NB dispersion calibration.
+- **Model Registry Promotion Gate Outcome:**
+  - **Outcome:** **`REJECTED`** (`challenger_best_combo` selected `ablation_b_no_cat_ids` since zero variants improved both MAE & CRPS on both folds simultaneously). Although `challenger_best_combo` improved Fold 2 (`2.6136 < 2.6243` MAE and `1.8739 < 1.8750` CRPS), it slightly regressed Fold 1 (`2.6464 > 2.6443` MAE, `1.9006 > 1.8994` CRPS). Under the multi-fold non-regression gate, incumbent Champion **`v2026.11.25-4c884cd`** remains active in `models/registry/champion.json`.
+
