@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import sqlalchemy
@@ -19,13 +19,58 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso_utc(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def compute_clv_bps(
+    side: str, effective_entry_price: float, closing_mid_price: float
+) -> float:
+    """Computes side-adjusted Closing Line Value in basis points against YES-side prices."""
+    entry = float(effective_entry_price)
+    close = float(closing_mid_price)
+    if str(side).strip().lower() == "bid":
+        return float((close - entry) * 10000.0)
+    return float((entry - close) * 10000.0)
+
+
 class SettlementReconciler:
     """Persists OMS orders/fills and reconciles settled outcomes directly into DriftMonitor."""
 
-    def __init__(self, drift_monitor: DriftMonitor):
+    _MIGRATION_COLUMNS: tuple[tuple[str, sqlalchemy.Column, str], ...] = (
+        ("env", sqlalchemy.Column("env", sqlalchemy.String(16), nullable=True), "VARCHAR(16)"),
+        ("model_version", sqlalchemy.Column("model_version", sqlalchemy.String(64), nullable=True), "VARCHAR(64)"),
+        ("best_bid_at_entry", sqlalchemy.Column("best_bid_at_entry", sqlalchemy.Float, nullable=True), "FLOAT"),
+        ("best_ask_at_entry", sqlalchemy.Column("best_ask_at_entry", sqlalchemy.Float, nullable=True), "FLOAT"),
+        ("market_mid_at_entry", sqlalchemy.Column("market_mid_at_entry", sqlalchemy.Float, nullable=True), "FLOAT"),
+        ("closing_mid_price", sqlalchemy.Column("closing_mid_price", sqlalchemy.Float, nullable=True), "FLOAT"),
+        ("clv_bps", sqlalchemy.Column("clv_bps", sqlalchemy.Float, nullable=True), "FLOAT"),
+        ("rejection_reason", sqlalchemy.Column("rejection_reason", sqlalchemy.Text, nullable=True), "TEXT"),
+    )
+
+    def __init__(
+        self,
+        drift_monitor: DriftMonitor,
+        *,
+        auto_report_path: Optional[str] = None,
+        auto_json_report_path: Optional[str] = None,
+    ):
         self.drift_monitor = drift_monitor
         self.engine = drift_monitor.engine
         self.metadata = drift_monitor.metadata
+        self.auto_report_path = auto_report_path
+        self.auto_json_report_path = auto_json_report_path
 
         if "oms_orders" not in self.metadata.tables:
             self.orders_table = sqlalchemy.Table(
@@ -59,9 +104,20 @@ class SettlementReconciler:
                 sqlalchemy.Column("created_at", sqlalchemy.String(64), nullable=False),
                 sqlalchemy.Column("settled_at", sqlalchemy.String(64), nullable=True),
                 sqlalchemy.Column("realized_pnl", sqlalchemy.Float, nullable=True),
+                sqlalchemy.Column("env", sqlalchemy.String(16), nullable=True),
+                sqlalchemy.Column("model_version", sqlalchemy.String(64), nullable=True),
+                sqlalchemy.Column("best_bid_at_entry", sqlalchemy.Float, nullable=True),
+                sqlalchemy.Column("best_ask_at_entry", sqlalchemy.Float, nullable=True),
+                sqlalchemy.Column("market_mid_at_entry", sqlalchemy.Float, nullable=True),
+                sqlalchemy.Column("closing_mid_price", sqlalchemy.Float, nullable=True),
+                sqlalchemy.Column("clv_bps", sqlalchemy.Float, nullable=True),
+                sqlalchemy.Column("rejection_reason", sqlalchemy.Text, nullable=True),
             )
         else:
             self.orders_table = self.metadata.tables["oms_orders"]
+            for col_name, col_obj, _ in self._MIGRATION_COLUMNS:
+                if col_name not in self.orders_table.c:
+                    self.orders_table.append_column(col_obj.copy())
 
         if "oms_fills" not in self.metadata.tables:
             self.fills_table = sqlalchemy.Table(
@@ -82,6 +138,24 @@ class SettlementReconciler:
             self.fills_table = self.metadata.tables["oms_fills"]
 
         self.metadata.create_all(self.engine)
+        self._ensure_orders_columns()
+
+    def _ensure_orders_columns(self) -> None:
+        """Backward-compatible ALTER TABLE migration for existing SQLite/SQL oms_orders tables."""
+        insp = sqlalchemy.inspect(self.engine)
+        existing = {col["name"] for col in insp.get_columns("oms_orders")}
+        missing = [
+            (col_name, sql_type)
+            for col_name, _, sql_type in self._MIGRATION_COLUMNS
+            if col_name not in existing
+        ]
+        if not missing:
+            return
+        with self.engine.begin() as conn:
+            for col_name, sql_type in missing:
+                conn.execute(
+                    sqlalchemy.text(f"ALTER TABLE oms_orders ADD COLUMN {col_name} {sql_type}")
+                )
 
     def record_order(
         self,
@@ -102,7 +176,19 @@ class SettlementReconciler:
         kalshi_order_id: Optional[str] = None,
         status: str = "submitted",
         created_at: Optional[str] = None,
+        env: str = "demo",
+        model_version: Optional[str] = None,
+        best_bid_at_entry: Optional[float] = None,
+        best_ask_at_entry: Optional[float] = None,
+        market_mid_at_entry: Optional[float] = None,
+        closing_mid_price: Optional[float] = None,
+        clv_bps: Optional[float] = None,
+        rejection_reason: Optional[str] = None,
     ) -> str:
+        computed_clv = clv_bps
+        if computed_clv is None and closing_mid_price is not None:
+            computed_clv = compute_clv_bps(side, limit_price, closing_mid_price)
+
         row = {
             "client_order_id": str(client_order_id),
             "kalshi_order_id": str(kalshi_order_id) if kalshi_order_id else None,
@@ -126,6 +212,14 @@ class SettlementReconciler:
             "created_at": created_at or _utc_now_iso(),
             "settled_at": None,
             "realized_pnl": None,
+            "env": str(env or "demo"),
+            "model_version": str(model_version) if model_version else None,
+            "best_bid_at_entry": float(best_bid_at_entry) if best_bid_at_entry is not None else None,
+            "best_ask_at_entry": float(best_ask_at_entry) if best_ask_at_entry is not None else None,
+            "market_mid_at_entry": float(market_mid_at_entry) if market_mid_at_entry is not None else None,
+            "closing_mid_price": float(closing_mid_price) if closing_mid_price is not None else None,
+            "clv_bps": float(computed_clv) if computed_clv is not None else None,
+            "rejection_reason": str(rejection_reason) if rejection_reason else None,
         }
         with self.engine.begin() as conn:
             conn.execute(self.orders_table.insert(), row)
@@ -137,10 +231,13 @@ class SettlementReconciler:
         *,
         kalshi_order_id: Optional[str] = None,
         status: str = "submitted",
+        rejection_reason: Optional[str] = None,
     ) -> None:
         vals: Dict[str, Any] = {"status": str(status)}
         if kalshi_order_id is not None:
             vals["kalshi_order_id"] = str(kalshi_order_id)
+        if rejection_reason is not None:
+            vals["rejection_reason"] = str(rejection_reason)
         with self.engine.begin() as conn:
             conn.execute(
                 self.orders_table.update()
@@ -279,20 +376,158 @@ class SettlementReconciler:
                     else ("filled" if total_cnt >= int(order_row["requested_count"]) else "partially_filled")
                 )
 
+                update_vals: Dict[str, Any] = {
+                    "filled_count": total_cnt,
+                    "avg_fill_price": weighted_px,
+                    "fees_paid": total_fees,
+                    "slippage": slippage,
+                    "status": new_status,
+                }
+                if order_row["closing_mid_price"] is not None:
+                    update_vals["clv_bps"] = compute_clv_bps(
+                        order_row["side"],
+                        weighted_px,
+                        float(order_row["closing_mid_price"]),
+                    )
+
                 conn.execute(
                     self.orders_table.update()
                     .where(self.orders_table.c.client_order_id == cid)
-                    .values(
-                        filled_count=total_cnt,
-                        avg_fill_price=weighted_px,
-                        fees_paid=total_fees,
-                        slippage=slippage,
-                        status=new_status,
-                    )
+                    .values(**update_vals)
                 )
                 updated_orders += 1
 
         return {"fills_inserted": inserted, "orders_updated": updated_orders}
+
+    async def capture_closing_lines(
+        self,
+        kalshi_client: KalshiClient,
+        *,
+        close_window_minutes: float = 15.0,
+    ) -> Dict[str, Any]:
+        """Captures closing_mid_price & side-adjusted clv_bps via GET /markets/{ticker} once pre-close."""
+        now_utc = datetime.now(timezone.utc)
+        with self.engine.connect() as conn:
+            pending_rows = conn.execute(
+                sqlalchemy.select(self.orders_table).where(
+                    sqlalchemy.and_(
+                        self.orders_table.c.closing_mid_price.is_(None),
+                        self.orders_table.c.status.in_(
+                            ["pending", "submitted", "partially_filled", "filled", "dry_run"]
+                        ),
+                    )
+                )
+            ).mappings().all()
+
+        if not pending_rows:
+            return {"tickers_checked": 0, "orders_updated": 0}
+
+        by_ticker: Dict[str, List[Dict[str, Any]]] = {}
+        for row in pending_rows:
+            by_ticker.setdefault(str(row["ticker"]), []).append(dict(row))
+
+        updated_orders = 0
+        for ticker, rows in by_ticker.items():
+            try:
+                mkt = await kalshi_client.get_market(ticker)
+            except Exception as exc:
+                logger.warning(f"Failed fetching market snapshot for {ticker}: {exc}")
+                continue
+
+            closing_mid = mkt.get("market_mid")
+            if closing_mid is None:
+                closing_mid = mkt.get("last_price")
+            if closing_mid is None:
+                continue
+
+            status = str(mkt.get("status") or "").lower()
+            result = mkt.get("result")
+            close_dt = _parse_iso_utc(mkt.get("close_time"))
+            within_close_window = (
+                close_dt is None
+                or now_utc >= (close_dt - timedelta(minutes=float(close_window_minutes)))
+            )
+            market_closed_or_resolved = status in ("closed", "determined", "settled", "finalized") or result in ("yes", "no")
+            if not (market_closed_or_resolved or within_close_window):
+                continue
+
+            with self.engine.begin() as conn:
+                for row in rows:
+                    entry_px = (
+                        float(row["avg_fill_price"])
+                        if row["avg_fill_price"] is not None
+                        else float(row["limit_price"])
+                    )
+                    clv = compute_clv_bps(str(row["side"]), entry_px, float(closing_mid))
+                    conn.execute(
+                        self.orders_table.update()
+                        .where(
+                            sqlalchemy.and_(
+                                self.orders_table.c.client_order_id == row["client_order_id"],
+                                self.orders_table.c.closing_mid_price.is_(None),
+                            )
+                        )
+                        .values(closing_mid_price=float(closing_mid), clv_bps=float(clv))
+                    )
+                    updated_orders += 1
+
+        return {"tickers_checked": len(by_ticker), "orders_updated": updated_orders}
+
+    async def sync_shadow_settlements(self, kalshi_client: KalshiClient) -> Dict[str, Any]:
+        """Evaluates dry_run orders against GET /markets/{ticker} result without mixing into live P&L."""
+        now_iso = _utc_now_iso()
+        with self.engine.connect() as conn:
+            dry_rows = conn.execute(
+                sqlalchemy.select(self.orders_table).where(
+                    sqlalchemy.and_(
+                        self.orders_table.c.status == "dry_run",
+                        self.orders_table.c.realized_pnl.is_(None),
+                    )
+                )
+            ).mappings().all()
+
+        if not dry_rows:
+            return {"dry_run_settled": 0}
+
+        by_ticker: Dict[str, List[Dict[str, Any]]] = {}
+        for r in dry_rows:
+            by_ticker.setdefault(str(r["ticker"]), []).append(dict(r))
+
+        shadow_settled = 0
+        for ticker, rows in by_ticker.items():
+            try:
+                mkt = await kalshi_client.get_market(ticker)
+            except Exception as exc:
+                logger.warning(f"Shadow market lookup failed for {ticker}: {exc}")
+                continue
+            result = mkt.get("result")
+            if result not in ("yes", "no"):
+                continue
+            yes_won = result == "yes"
+            closing_mid = mkt.get("market_mid") if mkt.get("market_mid") is not None else mkt.get("last_price")
+
+            with self.engine.begin() as conn:
+                for row in rows:
+                    cnt = int(row["requested_count"] or 0)
+                    side = str(row["side"]).lower()
+                    cost_per = float(row["effective_cost"])
+                    payout_per = 1.0 if ((side == "bid" and yes_won) or (side == "ask" and not yes_won)) else 0.0
+                    shadow_pnl = float((payout_per - cost_per) * cnt - float(row["fees_paid"] or 0.0))
+                    upd: Dict[str, Any] = {
+                        "settled_at": now_iso,
+                        "realized_pnl": shadow_pnl,
+                    }
+                    if row["closing_mid_price"] is None and closing_mid is not None:
+                        upd["closing_mid_price"] = float(closing_mid)
+                        upd["clv_bps"] = compute_clv_bps(side, float(row["limit_price"]), float(closing_mid))
+                    conn.execute(
+                        self.orders_table.update()
+                        .where(self.orders_table.c.client_order_id == row["client_order_id"])
+                        .values(**upd)
+                    )
+                    shadow_settled += 1
+
+        return {"dry_run_settled": shadow_settled}
 
     async def sync_settlements(
         self, kalshi_client: KalshiClient, min_ts: Optional[int] = None
@@ -374,4 +609,20 @@ class SettlementReconciler:
             if ok:
                 drift_updates += 1
 
-        return {"orders_settled": settled_orders, "drift_telemetry_settled": drift_updates}
+        report_written = None
+        if self.auto_report_path:
+            from src.oms.report import PerformanceReporter
+
+            reporter = PerformanceReporter(self.drift_monitor, reconciler=self)
+            reporter.write_report(
+                env=kalshi_client.env,
+                md_path=self.auto_report_path,
+                json_path=self.auto_json_report_path,
+            )
+            report_written = self.auto_report_path
+
+        return {
+            "orders_settled": settled_orders,
+            "drift_telemetry_settled": drift_updates,
+            "report_written": report_written,
+        }

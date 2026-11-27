@@ -270,6 +270,58 @@ class KalshiClient:
             params["cursor"] = cursor
         return await self._request("GET", "/markets", params=params, authenticated=False)
 
+    @staticmethod
+    def _normalize_market_price(
+        market: Dict[str, Any], dollar_key: str, cent_key: str
+    ) -> Optional[float]:
+        """Normalizes Kalshi dollar-string or integer-cent prices to [0.0, 1.0]."""
+        raw_d = market.get(dollar_key)
+        if raw_d is not None and raw_d != "":
+            val = float(raw_d)
+            return float(val / 100.0 if val > 1.0 else val)
+
+        raw_c = market.get(cent_key)
+        if raw_c is not None and raw_c != "":
+            if isinstance(raw_c, bool):
+                return None
+            if isinstance(raw_c, int):
+                return float(raw_c / 100.0)
+            if isinstance(raw_c, str):
+                s = raw_c.strip()
+                if s.isdigit():
+                    return float(int(s) / 100.0)
+                val = float(s)
+                return float(val / 100.0 if val > 1.0 else val)
+            val = float(raw_c)
+            return float(val / 100.0 if val > 1.0 else val)
+        return None
+
+    async def get_market(self, ticker: str) -> Dict[str, Any]:
+        """Fetches single-market metadata & normalized [0, 1] quotes via GET /markets/{ticker}."""
+        data = await self._request("GET", f"/markets/{ticker}", authenticated=False)
+        market = dict(data.get("market", data) if isinstance(data, dict) else {})
+        yes_bid = self._normalize_market_price(market, "yes_bid_dollars", "yes_bid")
+        yes_ask = self._normalize_market_price(market, "yes_ask_dollars", "yes_ask")
+        last_price = self._normalize_market_price(market, "last_price_dollars", "last_price")
+        market_mid: Optional[float]
+        if yes_bid is not None and yes_ask is not None:
+            market_mid = round((yes_bid + yes_ask) / 2.0, 6)
+        else:
+            market_mid = last_price
+
+        raw_res = str(market.get("result") or "").strip().lower()
+        return {
+            **market,
+            "ticker": str(market.get("ticker") or ticker),
+            "status": str(market.get("status") or "").strip().lower() or None,
+            "close_time": market.get("close_time") or market.get("expiration_time"),
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "last_price": last_price,
+            "market_mid": market_mid,
+            "result": raw_res if raw_res in ("yes", "no") else None,
+        }
+
     async def get_orderbook(self, ticker: str, depth: Optional[int] = None) -> Dict[str, Any]:
         params = {"depth": int(depth)} if depth is not None else None
         return await self._request(
@@ -378,16 +430,41 @@ class KalshiClient:
         data = await self._request("GET", "/portfolio/positions", params=params, authenticated=True)
         return list(data.get("market_positions", data.get("positions", [])))
 
-    async def get_fills(self, min_ts: Optional[int] = None, limit: int = 200) -> List[Dict[str, Any]]:
-        params: Dict[str, Any] = {"limit": int(limit)}
-        if min_ts is not None:
-            params["min_ts"] = int(min_ts)
-        data = await self._request("GET", "/portfolio/fills", params=params, authenticated=True)
-        return list(data.get("fills", []))
+    async def _paginate_portfolio(
+        self,
+        path: str,
+        item_key: str,
+        *,
+        min_ts: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        seen_cursors: set[str] = set()
+        while True:
+            params: Dict[str, Any] = {"limit": int(limit)}
+            if min_ts is not None:
+                params["min_ts"] = int(min_ts)
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._request("GET", path, params=params, authenticated=True)
+            batch = list(data.get(item_key, []))
+            results.extend(batch)
+            next_cursor = data.get("cursor") or None
+            if not next_cursor or not batch or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return results
 
-    async def get_settlements(self, min_ts: Optional[int] = None, limit: int = 200) -> List[Dict[str, Any]]:
-        params: Dict[str, Any] = {"limit": int(limit)}
-        if min_ts is not None:
-            params["min_ts"] = int(min_ts)
-        data = await self._request("GET", "/portfolio/settlements", params=params, authenticated=True)
-        return list(data.get("settlements", []))
+    async def get_fills(self, min_ts: Optional[int] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        return await self._paginate_portfolio(
+            "/portfolio/fills", "fills", min_ts=min_ts, limit=limit
+        )
+
+    async def get_settlements(
+        self, min_ts: Optional[int] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        return await self._paginate_portfolio(
+            "/portfolio/settlements", "settlements", min_ts=min_ts, limit=limit
+        )

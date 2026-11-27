@@ -724,6 +724,11 @@ class DriftMonitor:
         """Sends an embedded alert payload to Discord when WARN_RETRAIN or CIRCUIT_BREAK triggers."""
         if not self.discord_webhook_url or report.get("action") == DriftAction.HEALTHY.value:
             return False
+        disable_flag = os.getenv("DISABLE_DISCORD_ALERTS", "").strip().lower() in ("1", "true", "yes", "on")
+        if disable_flag or os.getenv("PYTEST_CURRENT_TEST"):
+            import unittest.mock
+            if not isinstance(urllib.request.urlopen, unittest.mock.Base):
+                return False
 
         action = report.get("action", "WARN_RETRAIN")
         color = 15158332 if action == DriftAction.CIRCUIT_BREAK_FALLBACK_EWMA.value else 16776960
@@ -788,6 +793,11 @@ def send_discord_drift_alert(
     target_url = webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
     if not target_url:
         return False
+    disable_flag = os.getenv("DISABLE_DISCORD_ALERTS", "").strip().lower() in ("1", "true", "yes", "on")
+    if disable_flag or os.getenv("PYTEST_CURRENT_TEST"):
+        import unittest.mock
+        if not isinstance(urllib.request.urlopen, unittest.mock.Base):
+            return False
     payload = {
         "username": "Quant Ops Monitor",
         "embeds": [

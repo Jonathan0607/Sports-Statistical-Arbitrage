@@ -76,22 +76,27 @@ All notable production architecture, runtime, serving, and build changes are doc
 
 ---
 
-## [2026-11-25] Phase 4: Sandbox-First Kalshi OMS, ZINB Ladder Pricing & Closed-Loop Reconciliation
+## [2026-11-26] Phase 4: Sandbox-First Kalshi V2 OMS, ZINB Ladder Pricing, Closed-Loop Scorecard & Test Isolation
 
 ### Added
 - **Authenticated Kalshi Trade API v2 Client (`src/oms/kalshi_client.py`):**
-  - Implemented async `httpx.AsyncClient` REST wrapper supporting dynamic **Ed25519** and **RSA-PSS (SHA-256)** PEM private key signing (`KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-SIGNATURE`, `KALSHI-ACCESS-TIMESTAMP`) with automatic query-string stripping and `/trade-api/v2` path normalization.
+  - Implemented async `httpx.AsyncClient` REST wrapper supporting dynamic **Ed25519** and **RSA-PSS (SHA-256)** PEM private key signing (`KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-SIGNATURE`, `KALSHI-ACCESS-TIMESTAMP`) with query-string stripping and `/trade-api/v2` path normalization.
+  - Routed Kalshi V2 order writes explicitly to `POST /portfolio/events/orders`, single-order cancel `DELETE /portfolio/events/orders/{order_id}` (optional `?market_ticker=...` param stripped from signature), and atomic cross-shard `DELETE /portfolio/events/orders` while keeping reads on `GET /portfolio/orders`.
+  - Added single-market snapshot fetcher `get_market(ticker)` (`GET /markets/{ticker}` normalizing both dollar-string and integer-cent quotes to `[0, 1]`) and cursor pagination across `get_fills()` and `get_settlements()`.
   - Enforced strict Sandbox-first safety defaults (`env="demo"` -> `https://external-api.demo.kalshi.co/trade-api/v2`); `env="prod"` raises `RuntimeError` unless BOTH `env="prod"` and `live_armed=True` are passed explicitly.
   - Added deterministic UUID `client_order_id` idempotent `409 Conflict` handling and jittered exponential backoff for `429` / `5xx` responses.
 - **ZINB Multi-Threshold Ladder Pricer (`src/oms/ladder_pricer.py`):**
-  - Added exact ceiling-rounded Kalshi fee calculator `calculate_kalshi_fee()` (`ceil(100 * rate * multiplier * C * P * (1 - P)) / 100`), ZINB survival calculator `zinb_survival_at_least()`, dual YES (`bid`) / NO (`ask` at `1 - no_price`) evaluation across taker (`immediate_or_cancel`) and passive maker (`good_till_canceled`, `post_only=True`) modes, non-dominated rung filtering, and `/v1/allocate` Kelly sizing integration.
+  - Added exact ceiling-rounded Kalshi fee calculator `calculate_kalshi_fee()` (`ceil(100 * rate * multiplier * C * P * (1 - P)) / 100`), ZINB survival calculator `zinb_survival_at_least()`, dual YES (`bid`) / NO (`ask` at `1 - no_price`) evaluation across taker (`immediate_or_cancel`) and passive maker (`good_till_canceled`, `post_only=True`) modes, entry `yes_bid`/`yes_ask`/`market_mid` capture, non-dominated rung filtering, and `/v1/allocate` Kelly sizing integration.
 - **Deterministic Non-ML Risk Guardrails & Failsafe (`src/oms/risk_guardrails.py`):**
-  - Enforced hard pre-trade checks outside the ML stack: `.oms_kill_switch` / `OMS_KILL_SWITCH` kill switch + cancel-all sweep, `DriftMonitor` `fallback_active` circuit-breaker halt, stale quote rejection (`> 5000 ms`), price (`[0.05, 0.95]`) & spread (`<= 0.08`) bounds, per-order/market/total exposure and daily loss caps, and inference-outage cancel-all failsafe.
-- **Closed-Loop Settlement Reconciler & Runner (`src/oms/reconciler.py`, `src/oms/runner.py`):**
-  - Added SQLAlchemy `oms_orders` and `oms_fills` tables sharing `DriftMonitor`'s engine with `prediction_telemetry.prediction_id` foreign-key lineage, idempotent fill slippage accounting, realized P&L computation, and closed-loop `DriftMonitor.record_settlement()` updates.
-  - Added CLI execution runner `src/oms/runner.py` defaulting safely to `--env demo` and `dry_run=True` unless `--no-dry-run` is explicitly passed.
-- **Offline Phase 4 Test Suite (`tests/test_kalshi_oms.py`):**
-  - Added 100% offline tests covering Ed25519 & RSA-PSS signatures, `prod` lock, `409` idempotency + `429` retry, Kalshi fee math & YES/NO taker/maker ladder pricing, all 6 risk guardrails + failsafe cancellation, and full FastAPI ASGI `/v1/predict` + `/v1/allocate` + `/v1/drift` -> Kalshi `MockTransport` -> settlement -> `DriftMonitor` calibration loop.
+  - Enforced hard pre-trade checks outside the ML stack: `.oms_kill_switch` / `OMS_KILL_SWITCH` kill switch + atomic cancel-all sweep, `DriftMonitor` `fallback_active` circuit-breaker halt, stale quote rejection (`> 5000 ms`), price (`[0.05, 0.95]`) & spread (`<= 0.08`) bounds, per-order/market/total exposure and daily loss caps, and inference-outage cancel-all failsafe.
+- **Closed-Loop Settlement Reconciler, CLV Tracking & Performance Scorecard (`src/oms/reconciler.py`, `src/oms/report.py`, `src/oms/runner.py`):**
+  - Added SQLAlchemy `oms_orders` (including backward-compatible `ALTER TABLE` migration for `env`, `model_version`, `best_bid_at_entry`, `best_ask_at_entry`, `market_mid_at_entry`, `closing_mid_price`, `clv_bps`, `rejection_reason`) and `oms_fills` linked via `prediction_telemetry.prediction_id` foreign key, `capture_closing_lines()` pre-close CLV capture, isolated `sync_shadow_settlements()` dry-run evaluation, and `DriftMonitor.record_settlement()` updates.
+  - Created `src/oms/report.py` (`PerformanceReporter` + CLI) generating `docs/sandbox_performance.md` & `benchmarks/sandbox_performance.json` (paired bootstrap 95% ROI/CLV CIs, Model vs. Market Brier Skill Score / Log-Loss delta / 10-bin ECE, Maker vs. Taker microstructure, Stat/Side & Model Version tables, Risk/Drift snapshot, and isolated Shadow summary) with optional auto-regeneration hook on `sync_settlements()`.
+  - Updated CLI runner `src/oms/runner.py` with `.env` loading, `~/.kalshi/demo.pem` auto-discovery in `demo` mode, read-only `preflight_sandbox_connectivity()`, and strict `--env demo` / `dry_run=True` defaults.
+- **Test Isolation & Phase 4 Test Suites (`tests/conftest.py`, `tests/test_kalshi_oms.py`, `tests/test_oms_report.py`):**
+  - Added global pytest session fixture `tests/conftest.py` (`DISABLE_DISCORD_ALERTS=1`, stripping attached Discord logging handlers) plus transport guards in `scrapers/hfp_poller.py`, `src/execution.py`, and `src/drift_monitor.py`.
+  - Fixed sync `MagicMock` Redis await errors in `tests/test_hfp_poller.py` and `tests/test_3d_strict_enforcement.py`.
+  - Added offline tests covering Kalshi V2 client, CLV math, Brier Skill Score / Log-Loss / ECE, Drawdown & ROI, strict `dry_run`/`rejected` isolation, cursor pagination, and automatic scorecard generation.
 
 ### Changed
 - **Dependencies (`requirements.txt`):**

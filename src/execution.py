@@ -53,6 +53,19 @@ logging.basicConfig(
 import threading
 import urllib.request
 import json
+import unittest.mock
+
+
+def _discord_alerts_suppressed() -> bool:
+    """Returns True in pytest/disabled-alert runs unless HTTP/thread transport is mocked."""
+    disable_flag = os.getenv("DISABLE_DISCORD_ALERTS", "").strip().lower() in ("1", "true", "yes", "on")
+    if not (disable_flag or os.getenv("PYTEST_CURRENT_TEST")):
+        return False
+    return not (
+        isinstance(urllib.request.urlopen, unittest.mock.Base)
+        or isinstance(threading.Thread, unittest.mock.Base)
+    )
+
 
 class DiscordErrorHandler(logging.Handler):
     def __init__(self, webhook_url):
@@ -62,7 +75,7 @@ class DiscordErrorHandler(logging.Handler):
         self.cooldown_seconds = 3600    # 1-hour cooldown per unique error signature
 
     def emit(self, record):
-        if record.levelno < logging.ERROR:
+        if record.levelno < logging.ERROR or _discord_alerts_suppressed():
             return
             
         try:
@@ -111,6 +124,8 @@ class DiscordErrorHandler(logging.Handler):
             
             def send_error():
                 try:
+                    if _discord_alerts_suppressed():
+                        return
                     req = urllib.request.Request(
                         self.webhook_url,
                         data=json.dumps(payload).encode('utf-8'),
@@ -126,7 +141,8 @@ class DiscordErrorHandler(logging.Handler):
             pass
 
 discord_webhook = os.getenv("DISCORD_WEBHOOK_URL")
-if discord_webhook:
+_disable_flag = os.getenv("DISABLE_DISCORD_ALERTS", "").strip().lower() in ("1", "true", "yes", "on")
+if discord_webhook and not (_disable_flag or os.getenv("PYTEST_CURRENT_TEST")):
     handler = DiscordErrorHandler(discord_webhook)
     handler.setLevel(logging.ERROR)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -855,6 +871,8 @@ def send_discord_webhook_sync(url: str, data: dict) -> tuple[int, str]:
     """
     Sends the embed payload synchronously. Returns (status_code, response_body).
     """
+    if _discord_alerts_suppressed():
+        return 0, "suppressed_in_tests"
     req = urllib.request.Request(
         url,
         data=json.dumps(data).encode('utf-8'),

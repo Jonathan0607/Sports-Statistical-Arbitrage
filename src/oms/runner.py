@@ -77,6 +77,8 @@ async def run_cycle(
 
         if not predict_requests or not market_rungs_by_player_stat:
             summary["fills_sync"] = await reconciler.sync_fills(kalshi_client)
+            summary["closing_lines_sync"] = await reconciler.capture_closing_lines(kalshi_client)
+            summary["shadow_settlements_sync"] = await reconciler.sync_shadow_settlements(kalshi_client)
             summary["settlements_sync"] = await reconciler.sync_settlements(kalshi_client)
             return summary
 
@@ -96,6 +98,7 @@ async def run_cycle(
             summary["aborted_reason"] = f"inference_predict_outage:{exc}"
             return summary
 
+        model_version = str(pred_body.get("model_version") or "") or None
         all_candidates = []
         for pred in pred_body.get("predictions", []):
             key = (str(pred["player_id"]), str(pred["stat"]))
@@ -149,6 +152,29 @@ async def run_cycle(
                     drift_report=drift_report,
                 )
                 if not decision.approved:
+                    rej_cid = str(uuid.uuid4())
+                    reconciler.record_order(
+                        client_order_id=rej_cid,
+                        ticker=cand.ticker,
+                        player_id=cand.player_id,
+                        stat_key=cand.stat_key,
+                        threshold=cand.threshold,
+                        side=cand.side,
+                        execution_mode=cand.execution_mode,
+                        limit_price=cand.order_price,
+                        effective_cost=cand.effective_cost,
+                        requested_count=req_cnt,
+                        model_prob=cand.model_prob,
+                        expected_ev=cand.ev_edge,
+                        prediction_id=cand.prediction_id,
+                        status="rejected",
+                        env=kalshi_client.env,
+                        model_version=model_version,
+                        best_bid_at_entry=cand.yes_bid,
+                        best_ask_at_entry=cand.yes_ask,
+                        market_mid_at_entry=cand.market_mid,
+                        rejection_reason=decision.reason,
+                    )
                     summary["orders_blocked"].append({"ticker": cand.ticker, "reason": decision.reason})
                     continue
 
@@ -169,6 +195,11 @@ async def run_cycle(
                         expected_ev=cand.ev_edge,
                         prediction_id=cand.prediction_id,
                         status="dry_run",
+                        env=kalshi_client.env,
+                        model_version=model_version,
+                        best_bid_at_entry=cand.yes_bid,
+                        best_ask_at_entry=cand.yes_ask,
+                        market_mid_at_entry=cand.market_mid,
                     )
                     summary["orders_submitted"].append(
                         {
@@ -194,6 +225,11 @@ async def run_cycle(
                         expected_ev=cand.ev_edge,
                         prediction_id=cand.prediction_id,
                         status="pending",
+                        env=kalshi_client.env,
+                        model_version=model_version,
+                        best_bid_at_entry=cand.yes_bid,
+                        best_ask_at_entry=cand.yes_ask,
+                        market_mid_at_entry=cand.market_mid,
                     )
                     try:
                         resp = await kalshi_client.create_order(
@@ -222,10 +258,14 @@ async def run_cycle(
                             }
                         )
                     except KalshiAPIError as exc:
-                        reconciler.update_order_submission(cid, status="rejected")
+                        reconciler.update_order_submission(
+                            cid, status="rejected", rejection_reason=str(exc)
+                        )
                         summary["orders_blocked"].append({"ticker": cand.ticker, "reason": str(exc)})
 
         summary["fills_sync"] = await reconciler.sync_fills(kalshi_client)
+        summary["closing_lines_sync"] = await reconciler.capture_closing_lines(kalshi_client)
+        summary["shadow_settlements_sync"] = await reconciler.sync_shadow_settlements(kalshi_client)
         summary["settlements_sync"] = await reconciler.sync_settlements(kalshi_client)
         return summary
     finally:
@@ -261,7 +301,11 @@ async def async_main(args: argparse.Namespace) -> None:
     drift_monitor = DriftMonitor()
     pricer = LadderPricer(min_edge_bps=args.min_edge_bps)
     guardrails = RiskGuardrails(limits=RiskLimits(), drift_monitor=drift_monitor)
-    reconciler = SettlementReconciler(drift_monitor=drift_monitor)
+    reconciler = SettlementReconciler(
+        drift_monitor=drift_monitor,
+        auto_report_path="docs/sandbox_performance.md",
+        auto_json_report_path="benchmarks/sandbox_performance.json",
+    )
 
     async with KalshiClient(
         env=args.env,

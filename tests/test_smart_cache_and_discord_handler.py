@@ -168,10 +168,39 @@ def test_discord_error_handler():
         assert isinstance(req_arg, urllib.request.Request)
         assert req_arg.full_url == webhook_url
         
-        # Parse payload
+        # Verify payload structure
         data = json.loads(req_arg.data.decode('utf-8'))
         assert "embeds" in data
         embed = data["embeds"][0]
         assert "⚠️ System CRITICAL Detected" in embed["title"]
         assert "ValueError: Something went wrong" in embed["description"]
         assert any(f["name"] == "File" and "test.py:30" in f["value"] for f in embed["fields"])
+
+
+def test_discord_alerts_suppressed_in_pytest_when_unmocked():
+    """Unmocked Discord delivery must be a strict no-op under pytest / DISABLE_DISCORD_ALERTS=1."""
+    import os
+    from scrapers.hfp_poller import _discord_alerts_suppressed
+    from src.drift_monitor import send_discord_drift_alert
+    from src.execution import send_discord_webhook_sync
+
+    assert os.getenv("DISABLE_DISCORD_ALERTS") == "1"
+    assert _discord_alerts_suppressed() is True
+    assert not any(type(h).__name__ == "DiscordErrorHandler" for h in logging.getLogger().handlers)
+
+    poller = UnifiedRestPoller()
+    assert poller._dispatch_webhook_sync("https://discord.com/api/webhooks/mock", {"content": "noop"}) == 0
+    assert send_discord_webhook_sync("https://discord.com/api/webhooks/mock", {"content": "noop"}) == (
+        0,
+        "suppressed_in_tests",
+    )
+    assert (
+        send_discord_drift_alert(
+            edge_pct=-5.0,
+            meta_mae=4.0,
+            naive_mae=3.5,
+            sample_count=50,
+            webhook_url="https://discord.com/api/webhooks/mock",
+        )
+        is False
+    )

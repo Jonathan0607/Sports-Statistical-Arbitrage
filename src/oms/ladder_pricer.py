@@ -116,6 +116,9 @@ class LadderRungCandidate:
     ev_edge: float  # net EV per contract in dollars: p_model - (effective_cost + unit_fee)
     spread: float
     quote_timestamp_ms: int
+    yes_bid: float = 0.0
+    yes_ask: float = 1.0
+    market_mid: Optional[float] = None
     prediction_id: Optional[str] = None
     team_id: Optional[int] = None
     game_id: Optional[int] = None
@@ -173,6 +176,7 @@ class LadderPricer:
             return []
 
         spread = round(yes_ask - yes_bid, 4)
+        market_mid = round((yes_bid + yes_ask) / 2.0, 6)
         p_yes = zinb_survival_at_least(threshold, mu, alpha_disp, zero_inflation_prob)
         p_no = float(np.clip(1.0 - p_yes, 1e-6, 1.0 - 1e-6))
 
@@ -184,6 +188,9 @@ class LadderPricer:
             "yes_prob": p_yes,
             "spread": spread,
             "quote_timestamp_ms": ts_ms,
+            "yes_bid": float(yes_bid),
+            "yes_ask": float(yes_ask),
+            "market_mid": market_mid,
             "prediction_id": prediction_id,
             "team_id": team_id,
             "game_id": game_id,

@@ -81,6 +81,8 @@ def test_strict_line_enforcement():
         poller.redis.json = MagicMock()
         poller.redis.json().get = AsyncMock(return_value=None)
         poller.redis.json().set = AsyncMock()
+        poller.redis.get = AsyncMock(return_value=None)
+        poller.redis.set = AsyncMock(return_value=True)
         poller.redis.hset = AsyncMock()
         poller.redis.expire = AsyncMock()
         poller.redis.rpush = AsyncMock()

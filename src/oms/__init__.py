@@ -7,7 +7,8 @@ from src.oms.kalshi_client import (
     KalshiAPIError,
 )
 from src.oms.ladder_pricer import LadderPricer, LadderRungCandidate, calculate_kalshi_fee
-from src.oms.reconciler import SettlementReconciler
+from src.oms.reconciler import SettlementReconciler, compute_clv_bps
+from src.oms.report import PerformanceReporter
 from src.oms.risk_guardrails import RiskDecision, RiskGuardrails, RiskLimits
 
 __all__ = [
@@ -18,8 +19,10 @@ __all__ = [
     "LadderPricer",
     "LadderRungCandidate",
     "calculate_kalshi_fee",
+    "PerformanceReporter",
     "RiskDecision",
     "RiskGuardrails",
     "RiskLimits",
     "SettlementReconciler",
+    "compute_clv_bps",
 ]
